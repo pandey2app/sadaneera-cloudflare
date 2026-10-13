@@ -13,7 +13,7 @@ assets = { directory = "./public", binding = "ASSETS", not_found_handling = "sin
 # D1 Database Binding
 [[d1_databases]]
 binding = "DB"
-database_name = "sadaneera-invitations-test"
+database_name = "sadaneera-invitations"
 database_id = "baa8a66c-0f8f-43b4-9ad9-9ef2853b6877"
 
 # Non-sensitive Environment Variables
