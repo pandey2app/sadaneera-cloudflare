@@ -1,164 +1,141 @@
 /**
- * Cloudflare Workers Google Drive Storage Service
- * Uses standard Web Fetch API and multipart/related upload.
- * Secrets are read from env (Worker environment bindings).
+ * Google Drive helpers for Sadaneera Mahotsav 2026.
+ * Cloudflare Worker compatible; uses OAuth refresh-token credentials stored as secrets.
  */
 
-let cachedAccessToken = null;
-let tokenExpiresAt = 0;
+// Keep a code fallback so a Git-based redeploy cannot lose the destination folder.
+// Cloudflare's GOOGLE_DRIVE_FOLDER_ID secret takes precedence when configured.
+const DEFAULT_DRIVE_FOLDER_ID = '15twVb9QClYV5hjIgijDDyMfyUYIKJ47I';
+const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const DRIVE_API = 'https://www.googleapis.com/drive/v3/files';
+const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3/files';
 
-/**
- * Obtain a valid centralized Google Drive access token using Worker secrets
- */
-export async function getAccessToken(env) {
-  const now = Date.now();
-  if (cachedAccessToken && tokenExpiresAt > now + 60000) {
-    return cachedAccessToken;
+function getFolderId(env) {
+  const configured = String(env?.GOOGLE_DRIVE_FOLDER_ID || '').trim();
+  const folderId = configured || DEFAULT_DRIVE_FOLDER_ID;
+  if (!folderId) {
+    throw new Error('Google Drive destination folder is not configured. Set GOOGLE_DRIVE_FOLDER_ID.');
+  }
+  return folderId;
+}
+
+async function getAccessToken(env) {
+  const clientId = env?.GOOGLE_DRIVE_CLIENT_ID;
+  const clientSecret = env?.GOOGLE_DRIVE_CLIENT_SECRET;
+  const refreshToken = env?.GOOGLE_DRIVE_REFRESH_TOKEN;
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error('Google Drive OAuth secrets are missing. Required: GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_CLIENT_SECRET, GOOGLE_DRIVE_REFRESH_TOKEN.');
   }
 
-  const refreshToken = env.GOOGLE_DRIVE_REFRESH_TOKEN;
-  const clientId = env.GOOGLE_DRIVE_CLIENT_ID;
-  const clientSecret = env.GOOGLE_DRIVE_CLIENT_SECRET;
-
-  if (!refreshToken || !clientId) {
-    throw new Error('Google Drive configuration missing (GOOGLE_DRIVE_REFRESH_TOKEN or GOOGLE_DRIVE_CLIENT_ID not set).');
-  }
-
-  const params = new URLSearchParams({
+  const body = new URLSearchParams({
     client_id: clientId,
+    client_secret: clientSecret,
     refresh_token: refreshToken,
     grant_type: 'refresh_token'
   });
-  if (clientSecret) {
-    params.append('client_secret', clientSecret);
-  }
 
-  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+  const response = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params
+    body
   });
-
-  if (!tokenRes.ok) {
-    const errText = await tokenRes.text();
-    throw new Error(`Google Drive token refresh failed (${tokenRes.status}): ${errText}`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.access_token) {
+    throw new Error(`Google OAuth token refresh failed (${response.status}): ${data.error_description || data.error || 'No access token returned'}`);
   }
-
-  const tokenData = await tokenRes.json();
-  cachedAccessToken = tokenData.access_token;
-  const expiresInSec = tokenData.expires_in || 3600;
-  tokenExpiresAt = now + (expiresInSec * 1000);
-  return cachedAccessToken;
+  return data.access_token;
 }
 
-/**
- * Upload photo buffer to Google Drive folder using multipart/related upload
- */
-export async function uploadPhoto(photoBytes, filename, mimeType, env) {
-  const accessToken = await getAccessToken(env);
-  const folderId = env.GOOGLE_DRIVE_FOLDER_ID;
+function concatBytes(parts) {
+  const totalLength = parts.reduce((sum, part) => sum + part.length, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.length;
+  }
+  return result;
+}
 
+/** Upload an image into the configured Google Drive folder and return its Drive file ID. */
+export async function uploadPhoto(photoBytes, filename, mimeType = 'image/jpeg', env) {
+  if (!photoBytes || !photoBytes.length) throw new Error('Cannot upload an empty photo.');
+  const folderId = getFolderId(env);
+  const accessToken = await getAccessToken(env);
+  const boundary = `sadaneera_${crypto.randomUUID().replace(/-/g, '')}`;
+  const encoder = new TextEncoder();
   const metadata = {
-    name: filename || `guest_${Date.now()}.jpg`,
-    mimeType: mimeType || 'image/jpeg'
+    name: String(filename || `photo_${Date.now()}.jpg`),
+    mimeType: mimeType || 'image/jpeg',
+    parents: [folderId]
   };
-  if (folderId) {
-    metadata.parents = [folderId];
-  }
 
-  const boundary = '-------sadaneera_worker_boundary_' + Date.now();
-  const delimiter = `\r\n--${boundary}\r\n`;
-  const closeDelimiter = `\r\n--${boundary}--`;
+  const body = concatBytes([
+    encoder.encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`),
+    encoder.encode(`--${boundary}\r\nContent-Type: ${mimeType || 'image/jpeg'}\r\n\r\n`),
+    photoBytes instanceof Uint8Array ? photoBytes : new Uint8Array(photoBytes),
+    encoder.encode(`\r\n--${boundary}--`)
+  ]);
 
-  const metaHeader = delimiter +
-    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-    JSON.stringify(metadata) +
-    delimiter +
-    `Content-Type: ${mimeType || 'image/jpeg'}\r\n` +
-    'Content-Transfer-Encoding: binary\r\n\r\n';
-
-  const metaBytes = new TextEncoder().encode(metaHeader);
-  const closeBytes = new TextEncoder().encode(closeDelimiter);
-
-  // Combine metadata + binary photo + close delimiter
-  const totalLength = metaBytes.byteLength + photoBytes.byteLength + closeBytes.byteLength;
-  const combined = new Uint8Array(totalLength);
-  combined.set(metaBytes, 0);
-  combined.set(photoBytes, metaBytes.byteLength);
-  combined.set(closeBytes, metaBytes.byteLength + photoBytes.byteLength);
-
-  const uploadRes = await fetch(
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,webViewLink',
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': `multipart/related; boundary=${boundary}`,
-        'Content-Length': String(totalLength)
-      },
-      body: combined
-    }
-  );
-
-  if (!uploadRes.ok) {
-    const errText = await uploadRes.text();
-    throw new Error(`Google Drive upload failed (${uploadRes.status}): ${errText}`);
-  }
-
-  const uploadData = await uploadRes.json();
-  return {
-    fileId: uploadData.id,
-    webViewLink: uploadData.webViewLink
-  };
-}
-
-/**
- * Stream/Proxy photo directly from Google Drive to the client
- */
-export async function fetchPhotoResponse(fileId, env) {
-  const accessToken = await getAccessToken(env);
-  const driveRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`,
-    {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`
-      }
-    }
-  );
-
-  if (!driveRes.ok) {
-    return new Response(JSON.stringify({ success: false, message: 'Photo not found on Drive' }), {
-      status: 404,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  const contentType = driveRes.headers.get('content-type') || 'image/jpeg';
-  return new Response(driveRes.body, {
-    status: 200,
+  const response = await fetch(`${DRIVE_UPLOAD_API}?uploadType=multipart&fields=id,name,mimeType,parents`, {
+    method: 'POST',
     headers: {
-      'Content-Type': contentType,
-      'Cache-Control': 'public, max-age=604800, immutable'
-    }
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': `multipart/related; boundary=${boundary}`
+    },
+    body
   });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.id) {
+    throw new Error(`Google Drive photo upload failed (${response.status}): ${data.error?.message || 'Drive did not return a file ID'}`);
+  }
+  return { fileId: data.id, name: data.name, mimeType: data.mimeType, parents: data.parents || [folderId] };
 }
 
-/**
- * Delete a photo file from Google Drive
- */
-export async function deletePhoto(fileId, env) {
+/** Stream a private Drive photo through the Worker without exposing OAuth credentials. */
+export async function fetchPhotoResponse(fileId, env) {
+  if (!fileId || /[/?#]/.test(fileId)) {
+    return new Response('Invalid Google Drive file ID', { status: 400 });
+  }
   try {
     const accessToken = await getAccessToken(env);
-    const delRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`,
-      {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${accessToken}` }
-      }
-    );
-    return delRes.ok;
-  } catch (err) {
-    console.error('[DriveService] Failed to delete file:', fileId, err);
+    const response = await fetch(`${DRIVE_API}/${encodeURIComponent(fileId)}?alt=media`, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      return new Response(`Unable to fetch photo from Google Drive (${response.status}). ${detail.slice(0, 300)}`, {
+        status: response.status === 404 ? 404 : 502,
+        headers: { 'Cache-Control': 'no-store' }
+      });
+    }
+    const headers = new Headers();
+    headers.set('Content-Type', response.headers.get('Content-Type') || 'image/jpeg');
+    headers.set('Cache-Control', 'public, max-age=3600');
+    headers.set('X-Content-Type-Options', 'nosniff');
+    return new Response(response.body, { status: 200, headers });
+  } catch (error) {
+    return new Response(`Unable to fetch Google Drive photo: ${error?.message || 'Unknown error'}`, {
+      status: 502,
+      headers: { 'Cache-Control': 'no-store', 'Content-Type': 'text/plain; charset=utf-8' }
+    });
+  }
+}
+
+/** Delete a Drive photo. Returns true only when Drive confirms deletion. */
+export async function deletePhoto(fileId, env) {
+  if (!fileId) return false;
+  try {
+    const accessToken = await getAccessToken(env);
+    const response = await fetch(`${DRIVE_API}/${encodeURIComponent(fileId)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    // Drive API returns 204 for successful deletion. A 404 means it is already absent.
+    return response.ok || response.status === 404;
+  } catch (error) {
+    console.error('Google Drive photo deletion failed:', error?.message || error);
     return false;
   }
 }
