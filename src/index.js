@@ -25,6 +25,16 @@ function json(data, status = 200, headers = {}) {
   });
 }
 
+// Extract a Google Drive file ID from the app's stored photo URL.
+function getDriveFileId(photoUrl) {
+  if (!photoUrl || typeof photoUrl !== 'string') return null;
+  const marker = '/drive/';
+  const index = photoUrl.indexOf(marker);
+  if (index === -1) return null;
+  const tail = photoUrl.slice(index + marker.length).split(/[?#]/)[0];
+  return tail ? decodeURIComponent(tail) : null;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -327,37 +337,86 @@ export default {
       if (url.pathname === '/api/admins/reset-cards' && method === 'POST') {
         const auth = await authenticateRequest(request, env);
         if (auth.error) return json({ success: false, message: auth.error }, auth.status);
-        if (auth.user.role !== 'superadmin') return json({ success: false, message: 'Access denied.' }, 403);
+        if (auth.user.role !== 'superadmin') {
+          return json({ success: false, message: 'Access denied. Super Admin role required.' }, 403);
+        }
 
         const body = await request.json().catch(() => ({}));
         const { password, confirmation } = body;
         if (!password || confirmation !== 'DELETE ALL CARDS') {
-          return json({ success: false, message: 'Confirmation phrase "DELETE ALL CARDS" and password are required.' }, 400);
+          return json({
+            success: false,
+            message: 'Confirmation phrase "DELETE ALL CARDS" and password are required.'
+          }, 400);
         }
 
-        const superUser = await env.DB.prepare('SELECT password_hash FROM users WHERE id = ?').bind(auth.user.id).first();
+        const superUser = await env.DB.prepare(
+          'SELECT password_hash FROM users WHERE id = ?'
+        ).bind(auth.user.id).first();
         if (!superUser || !comparePassword(password, superUser.password_hash)) {
           return json({ success: false, message: 'Authentication failed. Incorrect password.' }, 401);
         }
 
-        // Delete all photos from Google Drive
-        const { results: allCards } = await env.DB.prepare('SELECT photo_url FROM invitations').all();
-        if (allCards && allCards.length > 0) {
-          for (const card of allCards) {
-            if (card.photo_url && card.photo_url.includes('/drive/')) {
-              const fileId = card.photo_url.split('/drive/')[1];
-              if (fileId) ctx.waitUntil(deletePhoto(fileId, env));
+        // Read every record, including soft-deleted records, before wiping D1.
+        const { results: allCards } = await env.DB.prepare(
+          'SELECT id, photo_url FROM invitations'
+        ).all();
+
+        // Attempt every Drive deletion and wait for the results. Do not silently
+        // claim success when a Drive photo could not be removed.
+        const driveFailures = [];
+        for (const card of (allCards || [])) {
+          const fileId = getDriveFileId(card.photo_url);
+          if (!fileId) {
+            if (card.photo_url) {
+              driveFailures.push({ record_id: card.id, reason: 'Could not extract Drive file ID from photo URL.' });
             }
+            continue;
+          }
+
+          const deleted = await deletePhoto(fileId, env);
+          if (!deleted) {
+            driveFailures.push({ record_id: card.id, file_id: fileId, reason: 'Google Drive deletion failed.' });
           }
         }
 
-        // Wipe invitations and reset sequence to 0
-        await env.DB.prepare('DELETE FROM invitations').run();
-        await env.DB.prepare('UPDATE card_sequence SET last_number = 0 WHERE id = 1').run();
+        // D1 batch runs the database cleanup and sequence reset together.
+        // Users/admins and event_settings are intentionally preserved.
+        await env.DB.batch([
+          env.DB.prepare('DELETE FROM invitations'),
+          env.DB.prepare(`
+            INSERT INTO card_sequence (id, last_number)
+            VALUES (1, 0)
+            ON CONFLICT(id) DO UPDATE SET last_number = 0
+          `)
+        ]);
+
+        const remaining = await env.DB.prepare(
+          'SELECT COUNT(*) AS total FROM invitations'
+        ).first();
+        const sequence = await env.DB.prepare(
+          'SELECT last_number FROM card_sequence WHERE id = 1'
+        ).first();
+
+        if ((remaining?.total || 0) !== 0 || !sequence || sequence.last_number !== 0) {
+          return json({
+            success: false,
+            message: 'Database cleanup or sequence reset could not be verified. Please inspect D1 before retrying.',
+            remaining_records: remaining?.total ?? null,
+            last_number: sequence?.last_number ?? null,
+            drive_cleanup_failures: driveFailures
+          }, 500);
+        }
 
         return json({
           success: true,
-          message: 'All invitation records safely deleted and card numbering sequence reset to 0.'
+          message: driveFailures.length === 0
+            ? 'All invitation records and associated Drive photos were deleted; numbering reset. The next card will be number 1.'
+            : 'All invitation records were deleted and numbering reset. Some Drive photo deletions failed; review drive_cleanup_failures before considering cleanup complete.',
+          deleted_records: (allCards || []).length,
+          remaining_records: 0,
+          next_card_number: 1,
+          drive_cleanup_failures: driveFailures
         });
       }
 
@@ -634,17 +693,23 @@ export default {
         const card = await env.DB.prepare('SELECT * FROM invitations WHERE id = ?').bind(cardId).first();
         if (!card) return json({ success: false, message: 'Card not found.' }, 404);
 
-        // Delete photo from Drive
-        if (card.photo_url && card.photo_url.includes('/drive/')) {
-          const fileId = card.photo_url.split('/drive/')[1];
-          if (fileId) ctx.waitUntil(deletePhoto(fileId, env));
+        // Attempt Drive deletion and report its actual result.
+        const fileId = getDriveFileId(card.photo_url);
+        let drivePhotoDeleted = null;
+        if (fileId) {
+          drivePhotoDeleted = await deletePhoto(fileId, env);
+        } else if (card.photo_url) {
+          drivePhotoDeleted = false;
         }
 
         await env.DB.prepare('DELETE FROM invitations WHERE id = ?').bind(cardId).run();
 
         return json({
           success: true,
-          message: `Card ${card.card_code} and its Drive photo permanently deleted.`
+          drive_photo_deleted: drivePhotoDeleted,
+          message: drivePhotoDeleted === false
+            ? `Card ${card.card_code} record was permanently deleted, but its Drive photo could not be confirmed deleted.`
+            : `Card ${card.card_code} record was permanently deleted${drivePhotoDeleted === true ? ' and its Drive photo was deleted' : ''}.`
         });
       }
 
