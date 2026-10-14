@@ -35,6 +35,27 @@ function getDriveFileId(photoUrl) {
   return tail ? decodeURIComponent(tail) : null;
 }
 
+// Safe, additive compatibility migration for older D1 databases. Never drops or rewrites records.
+async function ensureCompatibleSchema(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS card_sequence (id INTEGER PRIMARY KEY CHECK (id = 1), last_number INTEGER NOT NULL DEFAULT 0)`).run();
+  await env.DB.prepare(`INSERT OR IGNORE INTO card_sequence (id, last_number) VALUES (1, 0)`).run();
+  const tableInfo = await env.DB.prepare('PRAGMA table_info(invitations)').all();
+  const columns = new Set((tableInfo.results || []).map((column) => column.name));
+  const additions = [
+    ['card_serial', 'TEXT'],
+    ['is_deleted', 'INTEGER NOT NULL DEFAULT 0'],
+    ['deleted_at', 'DATETIME'],
+    ['deleted_by_id', 'INTEGER'],
+    ['deleted_by_name', 'TEXT'],
+    ['deleted_by_username', 'TEXT']
+  ];
+  for (const [name, type] of additions) {
+    if (columns.size && !columns.has(name)) {
+      await env.DB.prepare(`ALTER TABLE invitations ADD COLUMN ${name} ${type}`).run();
+    }
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -61,6 +82,8 @@ export default {
     }
 
     try {
+      // Additive migration for older deployed D1 schemas; preserves all existing data.
+      await ensureCompatibleSchema(env);
       // Auto-initialize default Super Admin if not present
       await ensureSuperAdmin(env);
 
@@ -427,44 +450,56 @@ export default {
         const auth = await authenticateRequest(request, env);
         if (auth.error) return json({ success: false, message: auth.error }, auth.status);
 
-        const totalRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE is_deleted = 0').first();
-        const activeAdminsRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM users WHERE is_active = 1').first();
-        const todayRow = await env.DB.prepare(
-          "SELECT COUNT(*) AS total FROM invitations WHERE is_deleted = 0 AND DATE(created_at) = DATE('now')"
-        ).first();
+        const [totalRow, activeRow, deletedRow, todayRow, todayAllRow, activeAdminsRow, adminRows, recentRows, themeRows, sequenceRow] = await Promise.all([
+          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations').first(),
+          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 0').first(),
+          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 1').first(),
+          env.DB.prepare("SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 0 AND DATE(created_at) = DATE('now')").first(),
+          env.DB.prepare("SELECT COUNT(*) AS total FROM invitations WHERE DATE(created_at) = DATE('now')").first(),
+          env.DB.prepare('SELECT COUNT(*) AS total FROM users WHERE is_active = 1').first(),
+          env.DB.prepare(`
+            SELECT u.id, u.full_name, u.username, u.role, u.created_at AS admin_created_at,
+              COUNT(i.id) AS total_cards,
+              COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 0 THEN i.id END) AS active_cards,
+              COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 1 THEN i.id END) AS deleted_actions,
+              COUNT(CASE WHEN DATE(i.created_at) = DATE('now') THEN i.id END) AS today_cards
+            FROM users u LEFT JOIN invitations i ON i.created_by_id = u.id
+            WHERE u.is_active = 1 GROUP BY u.id
+            ORDER BY total_cards DESC, u.full_name ASC
+          `).all(),
+          env.DB.prepare(`SELECT id, card_code, title, guest_name, photo_url, theme, created_by_name, created_at, is_deleted, deleted_by_name FROM invitations ORDER BY created_at DESC LIMIT 10`).all(),
+          env.DB.prepare('SELECT theme, COUNT(*) AS count FROM invitations WHERE COALESCE(is_deleted, 0) = 0 GROUP BY theme').all(),
+          env.DB.prepare('SELECT last_number FROM card_sequence WHERE id = 1').first()
+        ]);
 
-        const { results: themeRows } = await env.DB.prepare(
-          'SELECT theme, COUNT(*) AS count FROM invitations WHERE is_deleted = 0 GROUP BY theme'
-        ).all();
+        const admins = adminRows.results || [];
+        const lifetimeTotal = Number(totalRow?.total || 0);
+        const todayTotal = Number(todayAllRow?.total || 0);
+        const adminActivity = admins.map((a) => ({
+          ...a,
+          lifetime_percentage: lifetimeTotal ? (Number(a.total_cards || 0) * 100 / lifetimeTotal) : 0,
+          today_percentage: todayTotal ? (Number(a.today_cards || 0) * 100 / todayTotal) : 0
+        }));
+        const stats = {
+          totalCards: Number(activeRow?.total || 0),
+          todayCards: Number(todayRow?.total || 0),
+          totalAdmins: Number(activeAdminsRow?.total || 0),
+          myCards: Number((await env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE created_by_id = ? AND COALESCE(is_deleted, 0) = 0').bind(auth.user.id).first())?.total || 0),
+          lifetimeTotal,
+          todayTotal,
+          deletedCards: Number(deletedRow?.total || 0),
+          cardSequence: Number(sequenceRow?.last_number || 0),
+          adminActivity,
+          recentCards: recentRows.results || [],
+          themes: themeRows.results || []
+        };
 
-        const { results: recentRows } = await env.DB.prepare(`
-          SELECT id, card_code, title, guest_name, photo_url, theme, created_by_name, created_at
-          FROM invitations
-          WHERE is_deleted = 0
-          ORDER BY created_at DESC
-          LIMIT 8
-        `).all();
-
-        const { results: adminPerfRows } = await env.DB.prepare(`
-          SELECT 
-            u.id, u.full_name, u.username, u.role,
-            COUNT(CASE WHEN i.is_deleted = 0 THEN i.id END) AS cards_generated,
-            MAX(i.created_at) AS last_active
-          FROM users u
-          LEFT JOIN invitations i ON i.created_by_id = u.id
-          WHERE u.is_active = 1
-          GROUP BY u.id
-          ORDER BY cards_generated DESC, u.full_name ASC
-        `).all();
-
+        // Return both shapes for compatibility with older frontends.
         return json({
-          success: true,
-          total_cards: totalRow?.total || 0,
-          total_admins: activeAdminsRow?.total || 0,
-          today_cards: todayRow?.total || 0,
-          themes: themeRows || [],
-          recent_cards: recentRows || [],
-          admin_performance: adminPerfRows || []
+          success: true, stats,
+          total_cards: stats.totalCards, total_admins: stats.totalAdmins, today_cards: stats.todayCards,
+          themes: stats.themes, recent_cards: stats.recentCards, admin_performance: adminActivity,
+          card_sequence: stats.cardSequence
         });
       }
 
