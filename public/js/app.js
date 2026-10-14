@@ -915,12 +915,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const deleted = Number(c.is_deleted) === 1;
       const deletedBy = c.deleted_by_name ? `डिलीट बाय: ${c.deleted_by_name}` : 'डिलीट बाय: मुख्य प्रशासन';
 
+      const isSuperAdmin = state.user?.role === 'superadmin';
+      const isOwnCard = Number(c.created_by_id) === Number(state.user?.id);
+      const canDeleteCard = isSuperAdmin || isOwnCard;
       const actionButtons = deleted
         ? `<div class="deleted-action-label"><strong>🗑️ डिलीटेड</strong><span>${deletedBy}</span></div>`
         : `
           <button class="action-btn" title="कार्ड पुनः उत्पन्न व डाउनलोड करें" onclick="window.regenerateCardModal(${c.id})">🔄 पुनः उत्पन्न करें</button>
           <button class="action-btn" title="एडिट या डुप्लीकेट करें" onclick="window.duplicateCardToForm(${c.id})">✏️ डुप्लीकेट</button>
-          <button class="action-btn delete" title="डिलीट मार्क करें" onclick="window.deleteCardRecord(${c.id})">🗑️ हटाएं</button>
+          ${canDeleteCard ? `<button class="action-btn delete" title="कार्ड डिलीट मार्क करें" onclick="window.deleteCardRecord(${c.id})">🗑️ हटाएं</button>` : '<span class="text-muted" title="दूसरे एडमिन का कार्ड केवल Super Admin डिलीट कर सकता है">🔒 डिलीट अधिकार केवल Super Admin को</span>'}
         `;
 
       return `
