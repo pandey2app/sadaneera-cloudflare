@@ -726,37 +726,16 @@ export default {
         });
       }
 
-      // Permanent delete card (Super Admin Only)
+      // Permanent deletion is deliberately disabled through the ordinary card API.
+      // The Saved Records screen must only soft-delete: preserve the row/photo,
+      // mark is_deleted and record who deleted it. Permanent deletion, if retained,
+      // must be a separate explicit action from the designated Master Settings UI.
       const matchPermDelete = url.pathname.match(/^\/api\/cards\/(\d+)\/permanent$/);
       if (matchPermDelete && method === 'DELETE') {
-        const auth = await authenticateRequest(request, env);
-        if (auth.error) return json({ success: false, message: auth.error }, auth.status);
-        if (auth.user.role !== 'superadmin') {
-          return json({ success: false, message: 'Access denied. Super Admin role required for permanent deletion.' }, 403);
-        }
-
-        const cardId = parseInt(matchPermDelete[1], 10);
-        const card = await env.DB.prepare('SELECT * FROM invitations WHERE id = ?').bind(cardId).first();
-        if (!card) return json({ success: false, message: 'Card not found.' }, 404);
-
-        // Attempt Drive deletion and report its actual result.
-        const fileId = getDriveFileId(card.photo_url);
-        let drivePhotoDeleted = null;
-        if (fileId) {
-          drivePhotoDeleted = await deletePhoto(fileId, env);
-        } else if (card.photo_url) {
-          drivePhotoDeleted = false;
-        }
-
-        await env.DB.prepare('DELETE FROM invitations WHERE id = ?').bind(cardId).run();
-
         return json({
-          success: true,
-          drive_photo_deleted: drivePhotoDeleted,
-          message: drivePhotoDeleted === false
-            ? `Card ${card.card_code} record was permanently deleted, but its Drive photo could not be confirmed deleted.`
-            : `Card ${card.card_code} record was permanently deleted${drivePhotoDeleted === true ? ' and its Drive photo was deleted' : ''}.`
-        });
+          success: false,
+          message: 'यहाँ से Permanent Delete बंद है। रिकॉर्ड्स पेज से कार्ड केवल Soft Delete होगा; स्थायी हटाने के लिए Master Settings का निर्धारित विकल्प इस्तेमाल करें।'
+        }, 403);
       }
 
       return json({ success: false, message: 'API endpoint not found.' }, 404);
