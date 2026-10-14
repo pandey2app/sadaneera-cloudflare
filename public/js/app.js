@@ -754,6 +754,7 @@ document.addEventListener('DOMContentLoaded', () => {
       badge: state.form.badge,
       eventDate: s.event_date || '',
       eventVenue: s.event_venue || '',
+      username: state.user?.username || 'USER',
       photoData: state.form.photoData !== DEFAULT_AVATAR ? state.form.photoData : ''
     });
 
@@ -813,7 +814,8 @@ document.addEventListener('DOMContentLoaded', () => {
         event_date: s.event_date || '',
         event_time: s.event_time || '',
         event_venue: s.event_venue || '',
-        photo_base64: state.form.photoData
+        photo_base64: state.form.photoData,
+        checksum: state.form.checksum
       };
 
       // The API success response confirms that the D1 record has been inserted.
@@ -824,7 +826,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // Render and download before clearing the form, but don't misreport a saved
       // database record as a failed save if the browser blocks the PNG download.
       state.form.cardCode = savedCard.card_code;
-      state.form.checksum = savedCard.checksum ? `SN-${savedCard.checksum.slice(0,8).toUpperCase()}` : state.form.checksum;
+      state.form.checksum = savedCard.checksum || state.form.checksum;
       renderLivePreview();
       try {
         const cardNode = document.querySelector('#liveCardContainer .invitation-card');
@@ -919,6 +921,13 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ==========================================================================
+  // Display only 8 characters: creator username prefix (4) + first 4 hash characters.
+  // The full canonical checksum remains stored in D1 and is not truncated in storage.
+  function formatCardChecksum(username, checksum) {
+    const value = String(checksum || 'N/A').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return value.slice(0, 8);
+  }
+
   // Module 3: Records Table & On-the-fly Regeneration
   // ==========================================================================
   async function loadRecords() {
@@ -947,7 +956,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     tbody.innerHTML = cards.map(c => {
       const photoSrc = c.photo_url || DEFAULT_AVATAR;
-      const shortHash = c.checksum ? `SN-${c.checksum.slice(0, 8).toUpperCase()}` : 'N/A';
+      const shortHash = formatCardChecksum(c.created_by_username, c.checksum);
       const createdDate = new Date(c.created_at).toLocaleDateString('hi-IN', {
         day: 'numeric', month: 'short', year: 'numeric'
       });
@@ -961,8 +970,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const actionButtons = deleted
         ? `<div class="deleted-action-label"><strong>🗑️ डिलीटेड</strong><span>${deletedBy}</span></div>`
         : `
-          <button class="action-btn" title="कार्ड पुनः उत्पन्न व डाउनलोड करें" onclick="window.regenerateCardModal(${c.id})">🔄 पुनः उत्पन्न करें</button>
-          <button class="action-btn" title="एडिट या डुप्लीकेट करें" onclick="window.duplicateCardToForm(${c.id})">✏️ डुप्लीकेट</button>
+          <button class="action-btn" title="इस कार्ड की PNG डाउनलोड करें" onclick="window.downloadCardPng(${c.id})">⬇️ PNG डाउनलोड</button>
           ${canDeleteCard ? `<button class="action-btn delete" title="कार्ड डिलीट मार्क करें" onclick="window.deleteCardRecord(${c.id})">🗑️ हटाएं</button>` : '<span class="text-muted" title="दूसरे एडमिन का कार्ड केवल Super Admin डिलीट कर सकता है">🔒 डिलीट अधिकार केवल Super Admin को</span>'}
         `;
 
@@ -993,6 +1001,54 @@ document.addEventListener('DOMContentLoaded', () => {
     }).join('');
   }
 
+  // Download the saved card PNG directly from Saved Records without opening the modal.
+  // Render in an off-screen (but layout-rendered) container so html2canvas can capture it.
+  window.downloadCardPng = async function(cardId) {
+    let tempContainer;
+    try {
+      const res = await API.getCardById(cardId);
+      const card = res.card;
+      if (!card) throw new Error('कार्ड रिकॉर्ड नहीं मिला');
+      if (Number(card.is_deleted) === 1) {
+        showToast('यह कार्ड डिलीटेड है; डाउनलोड लॉक है।', 'error');
+        return;
+      }
+
+      const settings = res.masterSettings || state.masterSettings || {};
+      tempContainer = document.createElement('div');
+      tempContainer.style.cssText = 'position:fixed;left:-10000px;top:0;width:720px;z-index:-1;pointer-events:none;';
+      document.body.appendChild(tempContainer);
+      CardRenderer.renderInto(tempContainer, {
+        title: card.title,
+        guestName: card.guest_name,
+        guestAbout: card.guest_about,
+        guestBadge: card.guest_badge || 'विशिष्ट अतिथि',
+        photoUrl: card.photo_url,
+        theme: card.theme,
+        cardCode: card.card_code,
+        checksum: formatCardChecksum(card.created_by_username, card.checksum),
+        programName: settings.program_name,
+        programSubtitle: settings.program_subtitle,
+        invocation: settings.invocation,
+        invitationMessage: settings.invitation_message,
+        eventDate: settings.event_date,
+        eventTime: settings.event_time,
+        eventVenue: settings.event_venue,
+        organizer: settings.organizer_name
+      });
+
+      const cardNode = tempContainer.querySelector('.invitation-card');
+      if (!cardNode) throw new Error('कार्ड का प्रीव्यू तैयार नहीं हो सका');
+      const safeName = String(card.guest_name || 'Card').replace(/[^a-zA-Z0-9_\u0900-\u097F-]+/g, '_');
+      await CardRenderer.exportPNG(cardNode, `Sadaneera_${card.card_code}_${safeName}.png`);
+      showToast('कार्ड PNG डाउनलोड शुरू हो गया है', 'success');
+    } catch (err) {
+      showToast(err.message || 'PNG डाउनलोड नहीं हो सका', 'error');
+    } finally {
+      if (tempContainer) tempContainer.remove();
+    }
+  };
+
   window.regenerateCardModal = async function(cardId) {
     try {
       const res = await API.getCardById(cardId);
@@ -1020,7 +1076,7 @@ document.addEventListener('DOMContentLoaded', () => {
         photoUrl: card.photo_url,
         theme: card.theme,
         cardCode: card.card_code,
-        checksum: card.checksum ? `SN-${card.checksum.slice(0,8).toUpperCase()}` : 'VERIFIED',
+        checksum: formatCardChecksum(card.created_by_username, card.checksum),
         programName: s.program_name,
         programSubtitle: s.program_subtitle,
         invocation: s.invocation,
@@ -1051,9 +1107,6 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast('पोर्ट्रेट कार्ड PDF डाउनलोड हो रहा है...', 'info');
       };
 
-      document.getElementById('btnModalPrint').onclick = () => {
-        window.print();
-      };
 
       regenerateModal.showModal();
 
@@ -1087,46 +1140,9 @@ document.addEventListener('DOMContentLoaded', () => {
     regenerateModal.close();
   });
 
-  // Duplicate / Edit record to Generator
-  window.duplicateCardToForm = async function(cardId) {
-    try {
-      const res = await API.getCardById(cardId);
-      const card = res.card;
-      if (!card) return;
-
-      state.form.gender = card.gender;
-      state.form.title = card.title;
-      state.form.name = card.guest_name;
-      state.form.about = card.guest_about;
-      state.form.badge = card.guest_badge || 'विशिष्ट अतिथि';
-      state.form.theme = card.theme;
-      state.form.photoData = card.photo_url;
-      state.form.eventDate = card.event_date;
-      state.form.eventTime = card.event_time;
-      state.form.eventVenue = card.event_venue;
-      state.form.cardCode = `${card.card_code}-COPY`;
-
-      // Update inputs
-      inputGuestName.value = card.guest_name;
-      inputGuestAbout.value = card.guest_about;
-      if (inputGuestBadge) inputGuestBadge.value = state.form.badge;
-      selectTheme.value = card.theme;
-      inputEventDate.value = card.event_date;
-      inputEventTime.value = card.event_time;
-      inputEventVenue.value = card.event_venue;
-
-      // Update photo preview
-      document.getElementById('photoThumbnail').src = card.photo_url;
-      document.getElementById('photoUploadPlaceholder').style.display = 'none';
-      document.getElementById('photoPreviewWrap').style.display = 'flex';
-
-      setGenderAndTitle(card.gender);
-      switchTab('generator');
-      showToast(`रिकॉर्ड ${card.card_code} जेनरेटर में लोड किया गया`, 'info');
-    } catch (err) {
-      showToast('लोड करने में असमर्थ: ' + err.message, 'error');
-    }
-  };
+  // Edit/duplicate from Saved Records is intentionally disabled.
+  // This prevents the misleading "Edit" flow from creating a new card
+  // with a new serial number instead of updating the existing record.
 
   // Delete Card Record
   window.deleteCardRecord = async function(cardId) {
