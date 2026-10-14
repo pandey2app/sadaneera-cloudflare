@@ -698,7 +698,18 @@ export default {
         const card = await env.DB.prepare('SELECT * FROM invitations WHERE id = ?').bind(cardId).first();
         if (!card) return json({ success: false, message: 'Card not found.' }, 404);
 
-        if (card.is_deleted === 1) {
+        // Admins may soft-delete only cards they created. Super Admin can
+        // soft-delete any admin's card. Enforce this on the server, not only UI.
+        const isSuperAdmin = auth.user.role === 'superadmin';
+        const isOwner = Number(card.created_by_id) === Number(auth.user.id);
+        if (!isSuperAdmin && !isOwner) {
+          return json({
+            success: false,
+            message: 'आप दूसरे एडमिन का बनाया हुआ कार्ड डिलीट नहीं कर सकते। केवल Super Admin को यह अनुमति है।'
+          }, 403);
+        }
+
+        if (Number(card.is_deleted) === 1) {
           return json({ success: false, message: 'This card is already marked as deleted.' }, 400);
         }
 
