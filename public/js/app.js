@@ -27,6 +27,7 @@ document.addEventListener('DOMContentLoaded', () => {
     recordsFilter: {
       search: '',
       theme: '',
+      status: 'all', // include soft-deleted rows so their audit labels remain visible
       limit: 50,
       offset: 0
     }
@@ -721,9 +722,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==========================================================================
   document.getElementById('btnSaveRecord')?.addEventListener('click', async () => {
     const btn = document.getElementById('btnSaveRecord');
+    if (!btn || btn.disabled) return; // prevent duplicate submissions
     btn.disabled = true;
     btn.textContent = 'सहेजा जा रहा है...';
 
+    let savedCard = null;
+    let pngDownloaded = false;
     try {
       const s = state.masterSettings || {};
       const payload = {
@@ -739,24 +743,59 @@ document.addEventListener('DOMContentLoaded', () => {
         photo_base64: state.form.photoData
       };
 
+      // The API success response confirms that the D1 record has been inserted.
       const res = await API.createCard(payload);
+      if (!res?.success || !res?.card?.id) throw new Error(res?.message || 'कार्ड डेटाबेस में सेव होने की पुष्टि नहीं मिली।');
+      savedCard = res.card;
 
-      // Update the preview with the code/checksum returned by the server.
-      state.form.cardCode = res.card.card_code;
-      state.form.checksum = res.card.checksum ? `SN-${res.card.checksum.slice(0,8).toUpperCase()}` : state.form.checksum;
+      // Render and download before clearing the form, but don't misreport a saved
+      // database record as a failed save if the browser blocks the PNG download.
+      state.form.cardCode = savedCard.card_code;
+      state.form.checksum = savedCard.checksum ? `SN-${savedCard.checksum.slice(0,8).toUpperCase()}` : state.form.checksum;
       renderLivePreview();
+      try {
+        const cardNode = document.querySelector('#liveCardContainer .invitation-card');
+        if (!cardNode) throw new Error('कार्ड पूर्वावलोकन तैयार नहीं हो सका।');
+        const filename = `Sadaneera_Invitation_${(state.form.name || 'Card').replace(/[^a-zA-Z0-9_\u0900-\u097F-]+/g, '_')}.png`;
+        await CardRenderer.exportPNG(cardNode, filename);
+        pngDownloaded = true;
+      } catch (downloadErr) {
+        console.warn('Card was saved to D1, but PNG download failed:', downloadErr);
+      }
 
-      // One-click workflow: the same Save action both stores the invitation
-      // online and downloads the final PNG locally.
-      const cardNode = document.querySelector('#liveCardContainer .invitation-card');
-      if (!cardNode) throw new Error('कार्ड पूर्वावलोकन तैयार नहीं हो सका।');
+      // Clear guest-specific fields after a confirmed save so the same click
+      // cannot accidentally create the same card again. Keep the selected theme.
+      state.form.name = '';
+      state.form.about = '';
+      state.form.badge = 'विशिष्ट अतिथि';
+      state.form.photoData = DEFAULT_AVATAR;
+      state.form.checksum = '';
+      state.form.cardCode = 'SN-NEXT';
+      inputGuestName.value = '';
+      inputGuestAbout.value = '';
+      if (inputGuestBadge) inputGuestBadge.value = 'विशिष्ट अतिथि';
+      if (photoFileInput) photoFileInput.value = '';
+      const photoWrap = document.getElementById('photoPreviewWrap');
+      const photoPlaceholder = document.getElementById('photoUploadPlaceholder');
+      const photoThumbnail = document.getElementById('photoThumbnail');
+      if (photoThumbnail) photoThumbnail.src = DEFAULT_AVATAR;
+      if (photoWrap) photoWrap.style.display = 'none';
+      if (photoPlaceholder) photoPlaceholder.style.display = 'block';
+      setGenderAndTitle('male');
+      validateAndUpdate();
+      renderLivePreview();
+      await loadRecords();
+      await loadDashboard();
 
-      const filename = `Sadaneera_Invitation_${(state.form.name || 'Card').replace(/[^a-zA-Z0-9_\u0900-\u097F-]+/g, '_')}.png`;
-      await CardRenderer.exportPNG(cardNode, filename);
-
-      showToast(`कार्ड ${res.card.card_code} वेबसाइट पर सुरक्षित हो गया और PNG डाउनलोड हो गया।`, 'success');
+      if (pngDownloaded) {
+        showToast(`कार्ड ${savedCard.card_code} डेटाबेस में सेव हो गया और PNG मोबाइल/डिवाइस में डाउनलोड हो गया। फॉर्म खाली कर दिया गया है।`, 'success');
+      } else {
+        showToast(`कार्ड ${savedCard.card_code} डेटाबेस में सेव हो गया, लेकिन PNG डाउनलोड नहीं हो सका। फॉर्म खाली कर दिया गया है; रिकॉर्ड दोबारा न बनाएं।`, 'info');
+      }
     } catch (err) {
-      showToast(err.message || 'कार्ड सहेजने में विफल', 'error');
+      showToast(savedCard
+        ? `कार्ड ${savedCard.card_code} डेटाबेस में सेव है, लेकिन बाद का चरण पूरा नहीं हुआ: ${err.message}`
+        : (err.message || 'कार्ड सहेजने में विफल'), 'error');
     } finally {
       btn.disabled = false;
       btn.textContent = '💾 सहेजें व कोड उत्पन्न करें (Save to Records)';
