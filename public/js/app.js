@@ -332,15 +332,55 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // Auth Dialog Form Handler
-  document.getElementById('loginForm')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const submitBtn = e.target.querySelector('button[type="submit"]');
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'प्रमाणित किया जा रहा है...';
+  // Auth Dialog Form Handler — authentication errors stay INSIDE the login modal.
+  const loginForm = document.getElementById('loginForm');
+  const loginUsernameInput = document.getElementById('loginUsername');
+  const loginPasswordInput = document.getElementById('loginPassword');
 
-    const username = document.getElementById('loginUsername').value;
-    const password = document.getElementById('loginPassword').value;
+  function showLoginInlineError(message) {
+    if (!loginForm) return;
+    let errorBox = document.getElementById('loginInlineError');
+    if (!errorBox) {
+      errorBox = document.createElement('div');
+      errorBox.id = 'loginInlineError';
+      errorBox.setAttribute('role', 'alert');
+      errorBox.setAttribute('aria-live', 'assertive');
+      Object.assign(errorBox.style, {
+        display: 'none', marginTop: '12px', padding: '10px 12px',
+        border: '1px solid #dc2626', borderRadius: '8px',
+        background: '#fef2f2', color: '#991b1b', fontSize: '0.92rem',
+        lineHeight: '1.45', fontWeight: '600', overflowWrap: 'anywhere'
+      });
+      const submit = loginForm.querySelector('button[type="submit"]');
+      if (submit) submit.insertAdjacentElement('afterend', errorBox);
+      else loginForm.appendChild(errorBox);
+    }
+    errorBox.textContent = message || 'गलत यूज़रनेम या पासवर्ड। कृपया दोबारा जाँचें।';
+    errorBox.style.display = 'block';
+  }
+
+  function clearLoginInlineError() {
+    const errorBox = document.getElementById('loginInlineError');
+    if (errorBox) {
+      errorBox.textContent = '';
+      errorBox.style.display = 'none';
+    }
+  }
+
+  loginUsernameInput?.addEventListener('input', clearLoginInlineError);
+  loginPasswordInput?.addEventListener('input', clearLoginInlineError);
+
+  loginForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    clearLoginInlineError();
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'प्रमाणित किया जा रहा है...';
+    }
+
+    const username = loginUsernameInput?.value?.trim() || '';
+    const password = loginPasswordInput?.value || '';
 
     try {
       const res = await API.login(username, password);
@@ -349,21 +389,21 @@ document.addEventListener('DOMContentLoaded', () => {
       closeLoginModal();
       updateHeaderUserUI();
       try { await loadMasterSettings(); } catch (_) {}
-      
-      // Automatically open dashboard upon successful login without requiring refresh
       switchTab('dashboard');
-
       showToast(`स्वागत है, ${res.user.full_name}!`, 'success');
-      if (typeof showInstallPromptOnce === 'function') {
-        showInstallPromptOnce();
-      }
+      if (typeof showInstallPromptOnce === 'function') showInstallPromptOnce();
     } catch (err) {
-      showToast(err.message || 'लॉगिन विफल (Invalid credentials)', 'error');
+      const rawMessage = String(err?.message || '');
+      const isCredentialError = /invalid credentials|wrong password|incorrect password|unauthorized|401|गलत|पासवर्ड|प्रमाणित/i.test(rawMessage);
+      showLoginInlineError(isCredentialError
+        ? 'गलत यूज़रनेम या पासवर्ड (Wrong credentials)। कृपया सही जानकारी दर्ज करें।'
+        : (rawMessage || 'लॉगिन नहीं हो सका। कृपया दोबारा प्रयास करें।'));
     } finally {
-      // GUARANTEED: Always hide splash screen on login completion
       hideSplash();
-      submitBtn.disabled = false;
-      submitBtn.textContent = 'लॉगिन करें (Sign In)';
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'लॉगिन करें (Sign In)';
+      }
     }
   });
 
