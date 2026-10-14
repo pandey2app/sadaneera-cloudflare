@@ -65,15 +65,48 @@ document.addEventListener('DOMContentLoaded', () => {
     if (type === 'success') icon = '✅';
     if (type === 'error') icon = '❌';
 
-    toast.innerHTML = `<span>${icon}</span><div>${message}</div>`;
-    toastContainer.appendChild(toast);
+    // Native <dialog> elements live in the browser's top layer. A toast attached
+    // to the page body can therefore sit BEHIND a blurred modal and be invisible.
+    // Put notifications inside the currently open dialog's card instead.
+    const openDialog = Array.from(document.querySelectorAll('dialog[open]'))
+      .reverse().find(dialog => dialog.getAttribute('aria-modal') === 'true' || dialog.open);
+    const modalCard = openDialog?.querySelector('.dialog-card');
+    let target = toastContainer;
+    if (modalCard) {
+      target = modalCard.querySelector('.modal-toast-stack');
+      if (!target) {
+        target = document.createElement('div');
+        target.className = 'modal-toast-stack';
+        Object.assign(target.style, {
+          position: 'relative', zIndex: '2147483647', width: '100%',
+          display: 'flex', flexDirection: 'column', gap: '8px',
+          marginBottom: '10px'
+        });
+        modalCard.insertBefore(target, modalCard.firstChild);
+      }
+    }
+
+    const iconNode = document.createElement('span');
+    iconNode.textContent = icon;
+    const messageNode = document.createElement('div');
+    messageNode.textContent = String(message ?? 'अनपेक्षित त्रुटि');
+    toast.append(iconNode, messageNode);
+    if (modalCard) {
+      toast.style.position = 'relative';
+      toast.style.width = '100%';
+      toast.style.maxWidth = 'none';
+      toast.style.boxSizing = 'border-box';
+      toast.style.whiteSpace = 'normal';
+      toast.style.overflowWrap = 'anywhere';
+    }
+    target.appendChild(toast);
 
     setTimeout(() => {
       toast.style.opacity = '0';
       toast.style.transform = 'translateY(10px)';
       toast.style.transition = 'all 0.3s ease';
       setTimeout(() => toast.remove(), 300);
-    }, 4000);
+    }, type === 'error' ? 8000 : 4500);
   }
   window.showToast = showToast;
 
@@ -855,7 +888,7 @@ document.addEventListener('DOMContentLoaded', () => {
     tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 2rem;">लोड हो रहा है...</td></tr>`;
 
     try {
-      const res = await API.getCards(state.recordsFilter);
+      const res = await API.getCards({ ...state.recordsFilter, status: 'all' });
       renderRecordsTable(res.cards || []);
       document.getElementById('totalRecordsBadge').textContent = `${res.total || 0} निमंत्रण कार्ड`;
     } catch (err) {
