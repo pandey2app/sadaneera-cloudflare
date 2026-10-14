@@ -54,11 +54,15 @@ class FormValidator {
     ].join('|');
 
     const fullHash = await sha256(rawString);
-    const shortChecksum = `SN-${fullHash.slice(0, 8).toUpperCase()}`;
+    // The creator prefix is part of the canonical checksum format; the complete
+    // SHA-256 digest is retained so the checksum remains verifiable.
+    const usernamePrefix = String(data.username || 'USER')
+      .normalize('NFKD').replace(/[^a-zA-Z0-9]/g, '').slice(0, 4).toUpperCase().padEnd(4, 'X');
+    const integrityChecksum = `${usernamePrefix}${fullHash.toUpperCase()}`;
 
     return {
       isValid,
-      checksum: shortChecksum,
+      checksum: integrityChecksum,
       fullHash,
       missing,
       checks
@@ -105,7 +109,7 @@ class FormValidator {
         pill.textContent = '✓ Checksum Verified (पूर्ण)';
       }
       if (hashDisplay) {
-        hashDisplay.textContent = `Integrity Hash: ${evalResult.fullHash.slice(0, 24)}... (${evalResult.checksum})`;
+        hashDisplay.textContent = `Integrity Checksum: ${String(evalResult.checksum).slice(0, 8)}`;
         hashDisplay.style.color = '#15803d';
       }
       if (submitBtn) submitBtn.disabled = false;
