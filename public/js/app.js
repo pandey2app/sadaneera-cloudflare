@@ -777,7 +777,7 @@ document.addEventListener('DOMContentLoaded', () => {
       photoUrl: state.form.photoData,
       theme: state.form.theme,
       cardCode: state.form.cardCode,
-      checksum: state.form.checksum || 'PENDING',
+      checksum: state.form.checksum || 'SN-CHECKSUM',
       programName: s.program_name,
       programSubtitle: s.program_subtitle,
       invocation: s.invocation,
@@ -820,14 +820,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // The API success response confirms that the D1 record has been inserted.
       const res = await API.createCard(payload);
-      if (!res?.success || !res?.card?.id || !res?.card?.checksum) throw new Error(res?.message || 'कार्ड डेटाबेस में सेव होने की पुष्टि नहीं मिली।');
-      // Do not start a PNG download until the Worker confirms the inserted D1 row and checksum.
+      if (!res?.success || !res?.card?.id) throw new Error(res?.message || 'कार्ड डेटाबेस में सेव होने की पुष्टि नहीं मिली।');
       savedCard = res.card;
 
       // Render and download before clearing the form, but don't misreport a saved
       // database record as a failed save if the browser blocks the PNG download.
       state.form.cardCode = savedCard.card_code;
-      state.form.checksum = savedCard.checksum || state.form.checksum;
+      // Keep the full checksum in D1; only the card artwork gets the 8-character display.
+      state.form.checksum = formatCardChecksum(savedCard.created_by_username || state.user?.username, savedCard.checksum || state.form.checksum);
       renderLivePreview();
       try {
         const cardNode = document.querySelector('#liveCardContainer .invitation-card');
@@ -925,8 +925,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // Display only 8 characters: creator username prefix (4) + first 4 hash characters.
   // The full canonical checksum remains stored in D1 and is not truncated in storage.
   function formatCardChecksum(username, checksum) {
-    const value = String(checksum || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-    return value.length >= 8 ? value.slice(0, 8) : 'PENDING';
+    const value = String(checksum || 'N/A').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return value.slice(0, 8);
   }
 
   // Module 3: Records Table & On-the-fly Regeneration
@@ -971,8 +971,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const actionButtons = deleted
         ? `<div class="deleted-action-label"><strong>🗑️ डिलीटेड</strong><span>${deletedBy}</span></div>`
         : `
-          <button class="action-btn" title="इस कार्ड की PNG डाउनलोड करें" onclick="window.downloadCardPng(${c.id})">⬇️ PNG डाउनलोड</button>
-          ${canDeleteCard ? `<button class="action-btn delete" title="कार्ड डिलीट मार्क करें" onclick="window.deleteCardRecord(${c.id})">🗑️ हटाएं</button>` : '<span class="text-muted" title="दूसरे एडमिन का कार्ड केवल Super Admin डिलीट कर सकता है">🔒 डिलीट अधिकार केवल Super Admin को</span>'}
+          <button class="action-btn" title="कार्ड देखें" aria-label="कार्ड देखें" onclick="window.regenerateCardModal(${c.id})">👁️ देखें</button>
+          <button class="action-btn" title="कार्ड PNG डाउनलोड करें" aria-label="कार्ड डाउनलोड करें" onclick="window.downloadCardPng(${c.id})">⬇️ डाउनलोड</button>
+          ${canDeleteCard ? `<button class="action-btn delete" title="कार्ड को Soft Delete करें" onclick="window.deleteCardRecord(${c.id})">🗑️ हटाएं</button>` : '<span class="text-muted" title="दूसरे एडमिन का कार्ड केवल Super Admin डिलीट कर सकता है">🔒 डिलीट अधिकार केवल Super Admin को</span>'}
         `;
 
       return `
@@ -1056,11 +1057,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const card = res.card;
       if (!card) return;
       if (Number(card.is_deleted) === 1) {
-        showToast('यह कार्ड डिलीटेड है; एडिट/डुप्लीकेट लॉक है।', 'error');
-        return;
-      }
-      if (Number(card.is_deleted) === 1) {
-        showToast('यह कार्ड डिलीटेड है; पुनः उत्पन्न/डाउनलोड लॉक है।', 'error');
+        showToast('यह कार्ड डिलीटेड है; देखना/डाउनलोड करना लॉक है।', 'error');
         return;
       }
 
