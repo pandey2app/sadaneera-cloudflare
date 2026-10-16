@@ -663,11 +663,13 @@ export default {
         const card = await env.DB.prepare('SELECT * FROM invitations WHERE id = ?').bind(cardId).first();
         if (!card) return json({ success: false, message: 'Card not found.' }, 404);
 
-        // Only Super Admin may soft-delete cards. Enforce this server-side.
-        if (auth.user.role !== 'superadmin') {
+        // Admins may soft-delete only their own cards; Super Admin may soft-delete any card.
+        const isSuperAdmin = auth.user.role === 'superadmin';
+        const isOwnCard = Number(card.created_by_id) === Number(auth.user.id);
+        if (!isSuperAdmin && !isOwnCard) {
           return json({
             success: false,
-            message: 'डिलीट प्रतिबंधित है। केवल Super Admin कार्ड डिलीट कर सकता है।'
+            message: 'यह कार्ड दूसरे Admin ने बनाया है। इसे केवल Super Admin डिलीट कर सकता है।'
           }, 403);
         }
 
