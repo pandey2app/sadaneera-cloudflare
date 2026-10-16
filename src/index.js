@@ -35,27 +35,6 @@ function getDriveFileId(photoUrl) {
   return tail ? decodeURIComponent(tail) : null;
 }
 
-// Safe, additive compatibility migration for older D1 databases. Never drops or rewrites records.
-async function ensureCompatibleSchema(env) {
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS card_sequence (id INTEGER PRIMARY KEY CHECK (id = 1), last_number INTEGER NOT NULL DEFAULT 0)`).run();
-  await env.DB.prepare(`INSERT OR IGNORE INTO card_sequence (id, last_number) VALUES (1, 0)`).run();
-  const tableInfo = await env.DB.prepare('PRAGMA table_info(invitations)').all();
-  const columns = new Set((tableInfo.results || []).map((column) => column.name));
-  const additions = [
-    ['card_serial', 'TEXT'],
-    ['is_deleted', 'INTEGER NOT NULL DEFAULT 0'],
-    ['deleted_at', 'DATETIME'],
-    ['deleted_by_id', 'INTEGER'],
-    ['deleted_by_name', 'TEXT'],
-    ['deleted_by_username', 'TEXT']
-  ];
-  for (const [name, type] of additions) {
-    if (columns.size && !columns.has(name)) {
-      await env.DB.prepare(`ALTER TABLE invitations ADD COLUMN ${name} ${type}`).run();
-    }
-  }
-}
-
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -82,8 +61,6 @@ export default {
     }
 
     try {
-      // Additive migration for older deployed D1 schemas; preserves all existing data.
-      await ensureCompatibleSchema(env);
       // Auto-initialize default Super Admin if not present
       await ensureSuperAdmin(env);
 
@@ -450,56 +427,44 @@ export default {
         const auth = await authenticateRequest(request, env);
         if (auth.error) return json({ success: false, message: auth.error }, auth.status);
 
-        const [totalRow, activeRow, deletedRow, todayRow, todayAllRow, activeAdminsRow, adminRows, recentRows, themeRows, sequenceRow] = await Promise.all([
-          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations').first(),
-          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 0').first(),
-          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 1').first(),
-          env.DB.prepare("SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 0 AND DATE(created_at) = DATE('now')").first(),
-          env.DB.prepare("SELECT COUNT(*) AS total FROM invitations WHERE DATE(created_at) = DATE('now')").first(),
-          env.DB.prepare('SELECT COUNT(*) AS total FROM users WHERE is_active = 1').first(),
-          env.DB.prepare(`
-            SELECT u.id, u.full_name, u.username, u.role, u.created_at AS admin_created_at,
-              COUNT(i.id) AS total_cards,
-              COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 0 THEN i.id END) AS active_cards,
-              COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 1 THEN i.id END) AS deleted_actions,
-              COUNT(CASE WHEN DATE(i.created_at) = DATE('now') THEN i.id END) AS today_cards
-            FROM users u LEFT JOIN invitations i ON i.created_by_id = u.id
-            WHERE u.is_active = 1 GROUP BY u.id
-            ORDER BY total_cards DESC, u.full_name ASC
-          `).all(),
-          env.DB.prepare(`SELECT id, card_code, title, guest_name, photo_url, theme, created_by_name, created_at, is_deleted, deleted_by_name FROM invitations ORDER BY created_at DESC LIMIT 10`).all(),
-          env.DB.prepare('SELECT theme, COUNT(*) AS count FROM invitations WHERE COALESCE(is_deleted, 0) = 0 GROUP BY theme').all(),
-          env.DB.prepare('SELECT last_number FROM card_sequence WHERE id = 1').first()
-        ]);
+        const totalRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE is_deleted = 0').first();
+        const activeAdminsRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM users WHERE is_active = 1').first();
+        const todayRow = await env.DB.prepare(
+          "SELECT COUNT(*) AS total FROM invitations WHERE is_deleted = 0 AND DATE(created_at) = DATE('now')"
+        ).first();
 
-        const admins = adminRows.results || [];
-        const lifetimeTotal = Number(totalRow?.total || 0);
-        const todayTotal = Number(todayAllRow?.total || 0);
-        const adminActivity = admins.map((a) => ({
-          ...a,
-          lifetime_percentage: lifetimeTotal ? (Number(a.total_cards || 0) * 100 / lifetimeTotal) : 0,
-          today_percentage: todayTotal ? (Number(a.today_cards || 0) * 100 / todayTotal) : 0
-        }));
-        const stats = {
-          totalCards: Number(activeRow?.total || 0),
-          todayCards: Number(todayRow?.total || 0),
-          totalAdmins: Number(activeAdminsRow?.total || 0),
-          myCards: Number((await env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE created_by_id = ? AND COALESCE(is_deleted, 0) = 0').bind(auth.user.id).first())?.total || 0),
-          lifetimeTotal,
-          todayTotal,
-          deletedCards: Number(deletedRow?.total || 0),
-          cardSequence: Number(sequenceRow?.last_number || 0),
-          adminActivity,
-          recentCards: recentRows.results || [],
-          themes: themeRows.results || []
-        };
+        const { results: themeRows } = await env.DB.prepare(
+          'SELECT theme, COUNT(*) AS count FROM invitations WHERE is_deleted = 0 GROUP BY theme'
+        ).all();
 
-        // Return both shapes for compatibility with older frontends.
+        const { results: recentRows } = await env.DB.prepare(`
+          SELECT id, card_code, title, guest_name, photo_url, theme, created_by_name, created_at
+          FROM invitations
+          WHERE is_deleted = 0
+          ORDER BY created_at DESC
+          LIMIT 8
+        `).all();
+
+        const { results: adminPerfRows } = await env.DB.prepare(`
+          SELECT 
+            u.id, u.full_name, u.username, u.role,
+            COUNT(CASE WHEN i.is_deleted = 0 THEN i.id END) AS cards_generated,
+            MAX(i.created_at) AS last_active
+          FROM users u
+          LEFT JOIN invitations i ON i.created_by_id = u.id
+          WHERE u.is_active = 1
+          GROUP BY u.id
+          ORDER BY cards_generated DESC, u.full_name ASC
+        `).all();
+
         return json({
-          success: true, stats,
-          total_cards: stats.totalCards, total_admins: stats.totalAdmins, today_cards: stats.todayCards,
-          themes: stats.themes, recent_cards: stats.recentCards, admin_performance: adminActivity,
-          card_sequence: stats.cardSequence
+          success: true,
+          total_cards: totalRow?.total || 0,
+          total_admins: activeAdminsRow?.total || 0,
+          today_cards: todayRow?.total || 0,
+          themes: themeRows || [],
+          recent_cards: recentRows || [],
+          admin_performance: adminPerfRows || []
         });
       }
 
@@ -572,7 +537,7 @@ export default {
         if (auth.error) return json({ success: false, message: auth.error }, auth.status);
 
         const contentType = request.headers.get('content-type') || '';
-        let title, gender, guest_name, guest_about, guest_badge, theme, photoBytes, mimeType, checksum, checksumPhotoSource = '', checksumEventDate = '', checksumEventVenue = '';
+        let title, gender, guest_name, guest_about, guest_badge, theme, photoBytes, mimeType, checksum;
 
         if (contentType.includes('multipart/form-data')) {
           const formData = await request.formData();
@@ -583,8 +548,6 @@ export default {
           guest_badge = formData.get('guest_badge') || 'विशिष्ट अतिथि';
           theme = formData.get('theme') || 'royal-gold';
           checksum = formData.get('checksum');
-          checksumEventDate = String(formData.get('event_date') || '');
-          checksumEventVenue = String(formData.get('event_venue') || '');
 
           const photoFile = formData.get('photo');
           if (photoFile && typeof photoFile === 'object') {
@@ -600,9 +563,6 @@ export default {
           guest_badge = body.guest_badge || 'विशिष्ट अतिथि';
           theme = body.theme || 'royal-gold';
           checksum = body.checksum;
-          checksumPhotoSource = String(body.photo_base64 || '');
-          checksumEventDate = String(body.event_date || '');
-          checksumEventVenue = String(body.event_venue || '');
 
           if (body.photo_base64) {
             const matches = body.photo_base64.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
@@ -669,33 +629,7 @@ export default {
         const driveResult = await uploadPhoto(photoBytes, photoFilename, mimeType, env);
         const photo_url = `/api/cards/photo/drive/${driveResult.fileId}`;
 
-        // Canonical integrity checksum: normalized creator username (4 chars) + full SHA-256.
-        // The card renderer displays only the first 8 characters; D1 keeps the complete value.
-        // JSON requests hash the same canonical source as public/js/validator.js.
-        let finalChecksum;
-        if (checksumPhotoSource) {
-          const usernamePrefix = String(auth.user.username || 'USER')
-            .normalize('NFKD').replace(/[^a-zA-Z0-9]/g, '').slice(0, 4).toUpperCase().padEnd(4, 'X');
-          const checksumRaw = [
-            title || '',
-            gender || '',
-            String(guest_name || '').trim().toLowerCase(),
-            String(guest_about || '').trim(),
-            String(guest_badge || '').trim(),
-            checksumEventDate,
-            checksumEventVenue,
-            checksumPhotoSource.slice(0, 100)
-          ].join('|');
-          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(checksumRaw));
-          const hashHex = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
-          finalChecksum = `${usernamePrefix}${hashHex}`;
-        } else {
-          // Multipart clients must provide the full canonical checksum; never invent an SN fallback.
-          if (!checksum || !/^[A-Z0-9]{4}[A-F0-9]{64}$/i.test(String(checksum))) {
-            return json({ success: false, message: 'असली integrity checksum नहीं मिला। कृपया पेज refresh करके दोबारा प्रयास करें।' }, 400);
-          }
-          finalChecksum = String(checksum).toUpperCase();
-        }
+        const finalChecksum = checksum || `SN-${cardCode}-${Date.now()}`;
 
         // Insert invitation record into D1
         const insertRes = await env.DB.prepare(`
@@ -712,9 +646,6 @@ export default {
         ).run();
 
         const createdCard = await env.DB.prepare('SELECT * FROM invitations WHERE id = ?').bind(insertRes.meta.last_row_id).first();
-        if (!createdCard || !createdCard.id || !createdCard.checksum || createdCard.checksum !== finalChecksum) {
-          return json({ success: false, message: 'डेटाबेस में सेव किए गए कार्ड की पुष्टि नहीं हो सकी। PNG डाउनलोड नहीं किया गया।' }, 500);
-        }
 
         return json({
           success: true,
@@ -732,14 +663,11 @@ export default {
         const card = await env.DB.prepare('SELECT * FROM invitations WHERE id = ?').bind(cardId).first();
         if (!card) return json({ success: false, message: 'Card not found.' }, 404);
 
-        // Admins may soft-delete only cards they created. Super Admin can
-        // soft-delete any admin's card. Enforce this on the server, not only UI.
-        const isSuperAdmin = auth.user.role === 'superadmin';
-        const isOwner = Number(card.created_by_id) === Number(auth.user.id);
-        if (!isSuperAdmin && !isOwner) {
+        // Only Super Admin may soft-delete cards. Enforce this server-side.
+        if (auth.user.role !== 'superadmin') {
           return json({
             success: false,
-            message: 'आप दूसरे एडमिन का बनाया हुआ कार्ड डिलीट नहीं कर सकते। केवल Super Admin को यह अनुमति है।'
+            message: 'डिलीट प्रतिबंधित है। केवल Super Admin कार्ड डिलीट कर सकता है।'
           }, 403);
         }
 
@@ -760,16 +688,37 @@ export default {
         });
       }
 
-      // Permanent deletion is deliberately disabled through the ordinary card API.
-      // The Saved Records screen must only soft-delete: preserve the row/photo,
-      // mark is_deleted and record who deleted it. Permanent deletion, if retained,
-      // must be a separate explicit action from the designated Master Settings UI.
+      // Permanent delete card (Super Admin Only)
       const matchPermDelete = url.pathname.match(/^\/api\/cards\/(\d+)\/permanent$/);
       if (matchPermDelete && method === 'DELETE') {
+        const auth = await authenticateRequest(request, env);
+        if (auth.error) return json({ success: false, message: auth.error }, auth.status);
+        if (auth.user.role !== 'superadmin') {
+          return json({ success: false, message: 'Access denied. Super Admin role required for permanent deletion.' }, 403);
+        }
+
+        const cardId = parseInt(matchPermDelete[1], 10);
+        const card = await env.DB.prepare('SELECT * FROM invitations WHERE id = ?').bind(cardId).first();
+        if (!card) return json({ success: false, message: 'Card not found.' }, 404);
+
+        // Attempt Drive deletion and report its actual result.
+        const fileId = getDriveFileId(card.photo_url);
+        let drivePhotoDeleted = null;
+        if (fileId) {
+          drivePhotoDeleted = await deletePhoto(fileId, env);
+        } else if (card.photo_url) {
+          drivePhotoDeleted = false;
+        }
+
+        await env.DB.prepare('DELETE FROM invitations WHERE id = ?').bind(cardId).run();
+
         return json({
-          success: false,
-          message: 'यहाँ से Permanent Delete बंद है। रिकॉर्ड्स पेज से कार्ड केवल Soft Delete होगा; स्थायी हटाने के लिए Master Settings का निर्धारित विकल्प इस्तेमाल करें।'
-        }, 403);
+          success: true,
+          drive_photo_deleted: drivePhotoDeleted,
+          message: drivePhotoDeleted === false
+            ? `Card ${card.card_code} record was permanently deleted, but its Drive photo could not be confirmed deleted.`
+            : `Card ${card.card_code} record was permanently deleted${drivePhotoDeleted === true ? ' and its Drive photo was deleted' : ''}.`
+        });
       }
 
       return json({ success: false, message: 'API endpoint not found.' }, 404);
