@@ -967,13 +967,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const isSuperAdmin = state.user?.role === 'superadmin';
       const isOwnCard = Number(c.created_by_id) === Number(state.user?.id);
-      const canDeleteCard = isSuperAdmin || isOwnCard;
+      const canDeleteCard = isSuperAdmin;
       const actionButtons = deleted
         ? `<div class="deleted-action-label"><strong>🗑️ डिलीटेड</strong><span>${deletedBy}</span></div>`
         : `
           <button class="action-btn" title="कार्ड देखें" aria-label="कार्ड देखें" onclick="window.regenerateCardModal(${c.id})">👁️ देखें</button>
           <button class="action-btn" title="कार्ड PNG डाउनलोड करें" aria-label="कार्ड डाउनलोड करें" onclick="window.downloadCardPng(${c.id})">⬇️ डाउनलोड</button>
-          ${canDeleteCard ? `<button class="action-btn delete" title="कार्ड को Soft Delete करें" onclick="window.deleteCardRecord(${c.id})">🗑️ हटाएं</button>` : '<span class="text-muted" title="दूसरे एडमिन का कार्ड केवल Super Admin डिलीट कर सकता है">🔒 डिलीट अधिकार केवल Super Admin को</span>'}
+          ${canDeleteCard ? `<button class="action-btn delete" title="कार्ड को Soft Delete करें" onclick="window.deleteCardRecord(${c.id})">🗑️ हटाएं</button>` : '<span class="text-muted" style="display:inline-flex;align-items:center;justify-content:center;width:30px;min-width:30px;height:30px;border:1px solid var(--border-color, #d1d5db);border-radius:8px;font-size:0.9rem;cursor:not-allowed;" title="डिलीट प्रतिबंधित — केवल Super Admin" aria-label="डिलीट प्रतिबंधित — केवल Super Admin">🔒</span>'}
         `;
 
       return `
