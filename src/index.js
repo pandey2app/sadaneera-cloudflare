@@ -572,7 +572,7 @@ export default {
         if (auth.error) return json({ success: false, message: auth.error }, auth.status);
 
         const contentType = request.headers.get('content-type') || '';
-        let title, gender, guest_name, guest_about, guest_badge, theme, photoBytes, mimeType, checksum;
+        let title, gender, guest_name, guest_about, guest_badge, theme, photoBytes, mimeType, checksum, checksumPhotoSource = '', checksumEventDate = '', checksumEventVenue = '';
 
         if (contentType.includes('multipart/form-data')) {
           const formData = await request.formData();
@@ -583,6 +583,8 @@ export default {
           guest_badge = formData.get('guest_badge') || 'विशिष्ट अतिथि';
           theme = formData.get('theme') || 'royal-gold';
           checksum = formData.get('checksum');
+          checksumEventDate = String(formData.get('event_date') || '');
+          checksumEventVenue = String(formData.get('event_venue') || '');
 
           const photoFile = formData.get('photo');
           if (photoFile && typeof photoFile === 'object') {
@@ -598,6 +600,9 @@ export default {
           guest_badge = body.guest_badge || 'विशिष्ट अतिथि';
           theme = body.theme || 'royal-gold';
           checksum = body.checksum;
+          checksumPhotoSource = String(body.photo_base64 || '');
+          checksumEventDate = String(body.event_date || '');
+          checksumEventVenue = String(body.event_venue || '');
 
           if (body.photo_base64) {
             const matches = body.photo_base64.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
@@ -664,7 +669,33 @@ export default {
         const driveResult = await uploadPhoto(photoBytes, photoFilename, mimeType, env);
         const photo_url = `/api/cards/photo/drive/${driveResult.fileId}`;
 
-        const finalChecksum = checksum || `SN-${cardCode}-${Date.now()}`;
+        // Canonical integrity checksum: normalized creator username (4 chars) + full SHA-256.
+        // The card renderer displays only the first 8 characters; D1 keeps the complete value.
+        // JSON requests hash the same canonical source as public/js/validator.js.
+        let finalChecksum;
+        if (checksumPhotoSource) {
+          const usernamePrefix = String(auth.user.username || 'USER')
+            .normalize('NFKD').replace(/[^a-zA-Z0-9]/g, '').slice(0, 4).toUpperCase().padEnd(4, 'X');
+          const checksumRaw = [
+            title || '',
+            gender || '',
+            String(guest_name || '').trim().toLowerCase(),
+            String(guest_about || '').trim(),
+            String(guest_badge || '').trim(),
+            checksumEventDate,
+            checksumEventVenue,
+            checksumPhotoSource.slice(0, 100)
+          ].join('|');
+          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(checksumRaw));
+          const hashHex = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+          finalChecksum = `${usernamePrefix}${hashHex}`;
+        } else {
+          // Multipart clients must provide the full canonical checksum; never invent an SN fallback.
+          if (!checksum || !/^[A-Z0-9]{4}[A-F0-9]{64}$/i.test(String(checksum))) {
+            return json({ success: false, message: 'असली integrity checksum नहीं मिला। कृपया पेज refresh करके दोबारा प्रयास करें।' }, 400);
+          }
+          finalChecksum = String(checksum).toUpperCase();
+        }
 
         // Insert invitation record into D1
         const insertRes = await env.DB.prepare(`
@@ -681,6 +712,9 @@ export default {
         ).run();
 
         const createdCard = await env.DB.prepare('SELECT * FROM invitations WHERE id = ?').bind(insertRes.meta.last_row_id).first();
+        if (!createdCard || !createdCard.id || !createdCard.checksum || createdCard.checksum !== finalChecksum) {
+          return json({ success: false, message: 'डेटाबेस में सेव किए गए कार्ड की पुष्टि नहीं हो सकी। PNG डाउनलोड नहीं किया गया।' }, 500);
+        }
 
         return json({
           success: true,
