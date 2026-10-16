@@ -777,7 +777,7 @@ document.addEventListener('DOMContentLoaded', () => {
       photoUrl: state.form.photoData,
       theme: state.form.theme,
       cardCode: state.form.cardCode,
-      checksum: state.form.checksum || 'SN-CHECKSUM',
+      checksum: state.form.checksum || 'PENDING',
       programName: s.program_name,
       programSubtitle: s.program_subtitle,
       invocation: s.invocation,
@@ -820,7 +820,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // The API success response confirms that the D1 record has been inserted.
       const res = await API.createCard(payload);
-      if (!res?.success || !res?.card?.id) throw new Error(res?.message || 'कार्ड डेटाबेस में सेव होने की पुष्टि नहीं मिली।');
+      if (!res?.success || !res?.card?.id || !res?.card?.checksum) throw new Error(res?.message || 'कार्ड डेटाबेस में सेव होने की पुष्टि नहीं मिली।');
+      // Do not start a PNG download until the Worker confirms the inserted D1 row and checksum.
       savedCard = res.card;
 
       // Render and download before clearing the form, but don't misreport a saved
@@ -924,8 +925,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // Display only 8 characters: creator username prefix (4) + first 4 hash characters.
   // The full canonical checksum remains stored in D1 and is not truncated in storage.
   function formatCardChecksum(username, checksum) {
-    const value = String(checksum || 'N/A').toUpperCase().replace(/[^A-Z0-9]/g, '');
-    return value.slice(0, 8);
+    const value = String(checksum || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return value.length >= 8 ? value.slice(0, 8) : 'PENDING';
   }
 
   // Module 3: Records Table & On-the-fly Regeneration
