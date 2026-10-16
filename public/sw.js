@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sadaneera-v16';
+const CACHE_NAME = 'sadaneera-v17-checksum-save-confirm';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
