@@ -967,13 +967,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const isSuperAdmin = state.user?.role === 'superadmin';
       const isOwnCard = Number(c.created_by_id) === Number(state.user?.id);
-      const canDeleteCard = isSuperAdmin;
+      const canDeleteCard = isSuperAdmin || isOwnCard;
       const actionButtons = deleted
         ? `<div class="deleted-action-label"><strong>🗑️ डिलीटेड</strong><span>${deletedBy}</span></div>`
         : `
           <button class="action-btn" title="कार्ड देखें" aria-label="कार्ड देखें" onclick="window.regenerateCardModal(${c.id})">👁️ देखें</button>
           <button class="action-btn" title="कार्ड PNG डाउनलोड करें" aria-label="कार्ड डाउनलोड करें" onclick="window.downloadCardPng(${c.id})">⬇️ डाउनलोड</button>
-          ${canDeleteCard ? `<button class="action-btn delete" title="कार्ड को Soft Delete करें" onclick="window.deleteCardRecord(${c.id})">🗑️ हटाएं</button>` : '<span class="text-muted" style="display:inline-flex;align-items:center;justify-content:center;width:30px;min-width:30px;height:30px;border:1px solid var(--border-color, #d1d5db);border-radius:8px;font-size:0.9rem;cursor:not-allowed;" title="डिलीट प्रतिबंधित — केवल Super Admin" aria-label="डिलीट प्रतिबंधित — केवल Super Admin">🔒</span>'}
+          ${canDeleteCard ? `<button class="action-btn delete" title="कार्ड को Soft Delete करें" aria-label="कार्ड हटाएं (Soft Delete)" onclick="window.deleteCardRecord(${c.id})">🗑️ हटाएं</button>` : '<span class="text-muted" style="display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;width:58px;min-width:58px;min-height:38px;padding:3px 4px;box-sizing:border-box;border:1px solid var(--border-color, #d1d5db);border-radius:8px;font-size:0.68rem;line-height:1.05;cursor:not-allowed;opacity:0.8;" title="दूसरे Admin का कार्ड — केवल Super Admin डिलीट कर सकता है" aria-label="डिलीट लॉक्ड — दूसरे Admin का कार्ड"><span style="font-size:0.95rem;line-height:1;">🗑️</span><span style="font-weight:700;letter-spacing:0.02em;">LOCKED</span></span>'}
         `;
 
       return `
