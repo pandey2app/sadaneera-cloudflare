@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sadaneera-v18';
+const CACHE_NAME = 'sadaneera-v19';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
