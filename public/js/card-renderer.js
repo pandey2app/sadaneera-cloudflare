@@ -26,7 +26,9 @@ const CardRenderer = {
     const photoUrl = data.photoUrl || '/assets/avatar-placeholder.svg';
     const theme = data.theme || 'royal-gold';
     const cardCode = data.cardCode || 'SN-0001-XXXX';
-    const checksum = data.checksum || 'VERIFIED';
+    // Display exactly 8 characters everywhere: creator prefix (4) + hash prefix (4).
+    // The complete canonical checksum remains stored in D1.
+    const checksum = String(data.checksum || 'PENDING').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
     const contactNumbers = ['9123220920', '8651419161', '9661779398', '7808953784'];
     
     // Dynamic event details from Settings / Database
