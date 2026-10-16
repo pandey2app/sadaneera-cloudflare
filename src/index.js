@@ -422,49 +422,85 @@ export default {
 
       // ----------------------------------------------------------------------
       // Stats / Dashboard Route
+      // Keep the nested `stats` shape required by the current frontend AND
+      // top-level aliases for compatibility with older dashboard clients.
       // ----------------------------------------------------------------------
       if (url.pathname === '/api/stats/dashboard' && method === 'GET') {
         const auth = await authenticateRequest(request, env);
         if (auth.error) return json({ success: false, message: auth.error }, auth.status);
 
-        const totalRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE is_deleted = 0').first();
-        const activeAdminsRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM users WHERE is_active = 1').first();
-        const todayRow = await env.DB.prepare(
-          "SELECT COUNT(*) AS total FROM invitations WHERE is_deleted = 0 AND DATE(created_at) = DATE('now')"
-        ).first();
+        const [
+          totalRow,
+          activeRow,
+          deletedRow,
+          todayRow,
+          todayAllRow,
+          activeAdminsRow,
+          adminRows,
+          recentRows,
+          themeRows,
+          sequenceRow,
+          myCardsRow
+        ] = await Promise.all([
+          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations').first(),
+          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 0').first(),
+          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 1').first(),
+          env.DB.prepare("SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 0 AND DATE(created_at) = DATE('now')").first(),
+          env.DB.prepare("SELECT COUNT(*) AS total FROM invitations WHERE DATE(created_at) = DATE('now')").first(),
+          env.DB.prepare('SELECT COUNT(*) AS total FROM users WHERE is_active = 1').first(),
+          env.DB.prepare(`
+            SELECT u.id, u.full_name, u.username, u.role, u.created_at AS admin_created_at,
+              COUNT(i.id) AS total_cards,
+              COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 0 THEN i.id END) AS active_cards,
+              COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 1 THEN i.id END) AS deleted_actions,
+              COUNT(CASE WHEN DATE(i.created_at) = DATE('now') THEN i.id END) AS today_cards
+            FROM users u LEFT JOIN invitations i ON i.created_by_id = u.id
+            WHERE u.is_active = 1 GROUP BY u.id
+            ORDER BY total_cards DESC, u.full_name ASC
+          `).all(),
+          env.DB.prepare(`
+            SELECT id, card_code, title, guest_name, photo_url, theme, created_by_name,
+                   created_at, COALESCE(is_deleted, 0) AS is_deleted, deleted_by_name
+            FROM invitations ORDER BY created_at DESC LIMIT 10
+          `).all(),
+          env.DB.prepare('SELECT theme, COUNT(*) AS count FROM invitations WHERE COALESCE(is_deleted, 0) = 0 GROUP BY theme').all(),
+          env.DB.prepare('SELECT last_number FROM card_sequence WHERE id = 1').first(),
+          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE created_by_id = ? AND COALESCE(is_deleted, 0) = 0').bind(auth.user.id).first()
+        ]);
 
-        const { results: themeRows } = await env.DB.prepare(
-          'SELECT theme, COUNT(*) AS count FROM invitations WHERE is_deleted = 0 GROUP BY theme'
-        ).all();
-
-        const { results: recentRows } = await env.DB.prepare(`
-          SELECT id, card_code, title, guest_name, photo_url, theme, created_by_name, created_at
-          FROM invitations
-          WHERE is_deleted = 0
-          ORDER BY created_at DESC
-          LIMIT 8
-        `).all();
-
-        const { results: adminPerfRows } = await env.DB.prepare(`
-          SELECT 
-            u.id, u.full_name, u.username, u.role,
-            COUNT(CASE WHEN i.is_deleted = 0 THEN i.id END) AS cards_generated,
-            MAX(i.created_at) AS last_active
-          FROM users u
-          LEFT JOIN invitations i ON i.created_by_id = u.id
-          WHERE u.is_active = 1
-          GROUP BY u.id
-          ORDER BY cards_generated DESC, u.full_name ASC
-        `).all();
+        const admins = adminRows.results || [];
+        const lifetimeTotal = Number(totalRow?.total || 0);
+        const todayTotal = Number(todayAllRow?.total || 0);
+        const adminActivity = admins.map((a) => ({
+          ...a,
+          lifetime_percentage: lifetimeTotal ? (Number(a.total_cards || 0) * 100 / lifetimeTotal) : 0,
+          today_percentage: todayTotal ? (Number(a.today_cards || 0) * 100 / todayTotal) : 0
+        }));
+        const stats = {
+          totalCards: Number(activeRow?.total || 0),
+          todayCards: Number(todayRow?.total || 0),
+          totalAdmins: Number(activeAdminsRow?.total || 0),
+          myCards: Number(myCardsRow?.total || 0),
+          lifetimeTotal,
+          todayTotal,
+          deletedCards: Number(deletedRow?.total || 0),
+          cardSequence: Number(sequenceRow?.last_number || 0),
+          adminActivity,
+          recentCards: recentRows.results || [],
+          themes: themeRows.results || []
+        };
 
         return json({
           success: true,
-          total_cards: totalRow?.total || 0,
-          total_admins: activeAdminsRow?.total || 0,
-          today_cards: todayRow?.total || 0,
-          themes: themeRows || [],
-          recent_cards: recentRows || [],
-          admin_performance: adminPerfRows || []
+          stats,
+          // Backward-compatible top-level aliases.
+          total_cards: stats.totalCards,
+          total_admins: stats.totalAdmins,
+          today_cards: stats.todayCards,
+          themes: stats.themes,
+          recent_cards: stats.recentCards,
+          admin_performance: adminActivity,
+          card_sequence: stats.cardSequence
         });
       }
 
