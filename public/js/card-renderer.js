@@ -139,7 +139,7 @@ const CardRenderer = {
           <div class="contact-block" aria-label="संपर्क सूत्र">
             <div class="contact-title">संपर्क सूत्र</div>
             <div class="contact-row contact-row-all">
-              <span class="contact-item">│&nbsp;${contactNumbers[0]}</span>
+              <span class="contact-item">&nbsp;${contactNumbers[0]}</span>
               <span class="contact-item">│&nbsp;${contactNumbers[1]}</span>
               <span class="contact-item">│&nbsp;${contactNumbers[2]}</span>
               <span class="contact-item">│&nbsp;${contactNumbers[3]}</span>
