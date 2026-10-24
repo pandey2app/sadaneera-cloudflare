@@ -1161,7 +1161,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const res = await API.deleteCard(cardId);
       showToast(res.message || 'रिकॉर्ड हटा दिया गया', 'success');
-      loadRecords();
+      await Promise.allSettled([loadRecords(), loadDashboard()]);
     } catch (err) {
       showToast(err.message || 'रिकॉर्ड हटाने में असमर्थ', 'error');
     }
@@ -1451,7 +1451,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function getCardChangeSignature(res) {
     const recent = (res?.recent_cards || []).map(card =>
-      `${card.id}:${Number(card.is_deleted) === 1 ? 1 : 0}`
+      `${card.id}:${Number(card.is_deleted) === 1 ? 1 : 0}:${card.created_at || ''}:${card.deleted_at || ''}`
     ).join(',');
     return [
       Number(res?.total_cards || 0),
@@ -1492,9 +1492,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function startCardChangeSync() {
     if (cardSyncTimer) clearInterval(cardSyncTimer);
     lastCardChangeSignature = null;
-    // Establish a baseline immediately, then check for updates every 8 seconds.
+    // Establish a baseline immediately, then check every 10 seconds. API reads
+    // use cache: 'no-store', so each check reflects the latest Worker/D1 state.
     syncCardChangesAcrossAdmins();
-    cardSyncTimer = setInterval(syncCardChangesAcrossAdmins, 60000);
+    cardSyncTimer = setInterval(syncCardChangesAcrossAdmins, 10000);
   }
 
   document.addEventListener('visibilitychange', () => {
