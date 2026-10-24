@@ -1333,24 +1333,28 @@ document.addEventListener('DOMContentLoaded', () => {
       // Normalize here so the dashboard and its charts use the live API contract.
       const rawAdmins = res.admin_performance || [];
       const totalCards = Number(res.total_cards || 0);
+      const activeCards = Number(res.active_cards || 0);
+      const deletedCards = Number(res.deleted_cards || 0);
       const todayCards = Number(res.today_cards || 0);
       const admins = rawAdmins.map((a) => ({
         ...a,
         full_name: a.full_name || 'Admin',
         username: a.username || '',
         admin_created_at: a.created_at || null,
-        total_cards: Number(a.cards_generated || 0),
-        active_cards: Number(a.cards_generated || 0),
-        deleted_actions: 0,
-        today_cards: 0,
-        lifetime_percentage: totalCards ? (Number(a.cards_generated || 0) / totalCards) * 100 : 0,
-        today_percentage: 0
+        total_cards: Number(a.total_cards || 0),
+        active_cards: Number(a.active_cards || 0),
+        deleted_actions: Number(a.deleted_cards || 0),
+        today_cards: Number(a.today_cards || 0),
+        lifetime_percentage: totalCards ? (Number(a.total_cards || 0) / totalCards) * 100 : 0,
+        today_percentage: todayCards ? (Number(a.today_cards || 0) / todayCards) * 100 : 0
       }));
       const stats = {
         totalCards,
+        activeCards,
+        deletedCards,
         todayCards,
         totalAdmins: Number(res.total_admins || 0),
-        myCards: Number(rawAdmins.find((a) => a.username === state.user?.username)?.cards_generated || 0),
+        myCards: Number(rawAdmins.find((a) => a.username === state.user?.username)?.total_cards || 0),
         lifetimeTotal: totalCards,
         todayTotal: todayCards,
         adminActivity: admins,
