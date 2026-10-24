@@ -242,7 +242,12 @@ export default {
           ORDER BY CASE WHEN u.role = 'superadmin' THEN 0 ELSE 1 END, u.created_at ASC
         `).all();
 
-        return json({ success: true, admins: results || [] });
+        const primaryUsername = (env.SUPERADMIN_USERNAME || 'superadmin').trim().toLowerCase();
+        const admins = (results || []).map((admin) => ({
+          ...admin,
+          is_primary: String(admin.username || '').trim().toLowerCase() === primaryUsername
+        }));
+        return json({ success: true, admins });
       }
 
       if (url.pathname === '/api/admins' && method === 'POST') {
@@ -324,14 +329,42 @@ export default {
         if (targetId === auth.user.id) {
           return json({ success: false, message: 'You cannot delete your own account.' }, 400);
         }
-        const target = await env.DB.prepare('SELECT id, role FROM users WHERE id = ?').bind(targetId).first();
+        const target = await env.DB.prepare('SELECT id, username, role FROM users WHERE id = ?').bind(targetId).first();
         if (!target) return json({ success: false, message: 'Admin account not found.' }, 404);
-        if (target.role === 'superadmin') {
-          return json({ success: false, message: 'Cannot delete a Super Admin account.' }, 400);
+
+        // The username configured in Worker secrets is the canonical account.
+        // It must never be deleted; ensureSuperAdmin() would provision it again.
+        const primaryUsername = (env.SUPERADMIN_USERNAME || 'superadmin').trim().toLowerCase();
+        if (String(target.username || '').trim().toLowerCase() === primaryUsername) {
+          return json({ success: false, message: 'यह मुख्य Super Admin खाता है; इसे हटाया नहीं जा सकता।' }, 400);
+        }
+
+        // A Super Admin may remove a duplicate/old Super Admin account, but not itself.
+        // Preserve invitation audit/history: mark that account's active cards as soft-deleted,
+        // do not hard-delete card rows or Google Drive photos from this account-management action.
+        const nowActor = auth.user;
+        const relatedCards = await env.DB.prepare(
+          'SELECT id FROM invitations WHERE created_by_id = ? AND COALESCE(is_deleted, 0) = 0'
+        ).bind(targetId).all();
+        if ((relatedCards.results || []).length > 0) {
+          await env.DB.prepare(`
+            UPDATE invitations
+            SET is_deleted = 1,
+                deleted_at = CURRENT_TIMESTAMP,
+                deleted_by_id = ?,
+                deleted_by_name = ?,
+                deleted_by_username = ?
+            WHERE created_by_id = ? AND COALESCE(is_deleted, 0) = 0
+          `).bind(nowActor.id, nowActor.full_name, nowActor.username, targetId).run();
         }
 
         await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(targetId).run();
-        return json({ success: true, message: 'Admin account deleted successfully.' });
+        return json({
+          success: true,
+          message: target.role === 'superadmin'
+            ? 'Duplicate Super Admin account removed. Its active cards were soft-deleted; records and photos are preserved.'
+            : 'Admin account deleted successfully.'
+        });
       }
 
       if (url.pathname === '/api/admins/reset-cards' && method === 'POST') {
@@ -422,85 +455,49 @@ export default {
 
       // ----------------------------------------------------------------------
       // Stats / Dashboard Route
-      // Keep the nested `stats` shape required by the current frontend AND
-      // top-level aliases for compatibility with older dashboard clients.
       // ----------------------------------------------------------------------
       if (url.pathname === '/api/stats/dashboard' && method === 'GET') {
         const auth = await authenticateRequest(request, env);
         if (auth.error) return json({ success: false, message: auth.error }, auth.status);
 
-        const [
-          totalRow,
-          activeRow,
-          deletedRow,
-          todayRow,
-          todayAllRow,
-          activeAdminsRow,
-          adminRows,
-          recentRows,
-          themeRows,
-          sequenceRow,
-          myCardsRow
-        ] = await Promise.all([
-          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations').first(),
-          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 0').first(),
-          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 1').first(),
-          env.DB.prepare("SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 0 AND DATE(created_at) = DATE('now')").first(),
-          env.DB.prepare("SELECT COUNT(*) AS total FROM invitations WHERE DATE(created_at) = DATE('now')").first(),
-          env.DB.prepare('SELECT COUNT(*) AS total FROM users WHERE is_active = 1').first(),
-          env.DB.prepare(`
-            SELECT u.id, u.full_name, u.username, u.role, u.created_at AS admin_created_at,
-              COUNT(i.id) AS total_cards,
-              COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 0 THEN i.id END) AS active_cards,
-              COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 1 THEN i.id END) AS deleted_actions,
-              COUNT(CASE WHEN DATE(i.created_at) = DATE('now') THEN i.id END) AS today_cards
-            FROM users u LEFT JOIN invitations i ON i.created_by_id = u.id
-            WHERE u.is_active = 1 GROUP BY u.id
-            ORDER BY total_cards DESC, u.full_name ASC
-          `).all(),
-          env.DB.prepare(`
-            SELECT id, card_code, title, guest_name, photo_url, theme, created_by_name,
-                   created_at, COALESCE(is_deleted, 0) AS is_deleted, deleted_by_name
-            FROM invitations ORDER BY created_at DESC LIMIT 10
-          `).all(),
-          env.DB.prepare('SELECT theme, COUNT(*) AS count FROM invitations WHERE COALESCE(is_deleted, 0) = 0 GROUP BY theme').all(),
-          env.DB.prepare('SELECT last_number FROM card_sequence WHERE id = 1').first(),
-          env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE created_by_id = ? AND COALESCE(is_deleted, 0) = 0').bind(auth.user.id).first()
-        ]);
+        const totalRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE is_deleted = 0').first();
+        const activeAdminsRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM users WHERE is_active = 1').first();
+        const todayRow = await env.DB.prepare(
+          "SELECT COUNT(*) AS total FROM invitations WHERE is_deleted = 0 AND DATE(created_at) = DATE('now')"
+        ).first();
 
-        const admins = adminRows.results || [];
-        const lifetimeTotal = Number(totalRow?.total || 0);
-        const todayTotal = Number(todayAllRow?.total || 0);
-        const adminActivity = admins.map((a) => ({
-          ...a,
-          lifetime_percentage: lifetimeTotal ? (Number(a.total_cards || 0) * 100 / lifetimeTotal) : 0,
-          today_percentage: todayTotal ? (Number(a.today_cards || 0) * 100 / todayTotal) : 0
-        }));
-        const stats = {
-          totalCards: Number(activeRow?.total || 0),
-          todayCards: Number(todayRow?.total || 0),
-          totalAdmins: Number(activeAdminsRow?.total || 0),
-          myCards: Number(myCardsRow?.total || 0),
-          lifetimeTotal,
-          todayTotal,
-          deletedCards: Number(deletedRow?.total || 0),
-          cardSequence: Number(sequenceRow?.last_number || 0),
-          adminActivity,
-          recentCards: recentRows.results || [],
-          themes: themeRows.results || []
-        };
+        const { results: themeRows } = await env.DB.prepare(
+          'SELECT theme, COUNT(*) AS count FROM invitations WHERE is_deleted = 0 GROUP BY theme'
+        ).all();
+
+        const { results: recentRows } = await env.DB.prepare(`
+          SELECT id, card_code, title, guest_name, photo_url, theme, created_by_name, created_at
+          FROM invitations
+          WHERE is_deleted = 0
+          ORDER BY created_at DESC
+          LIMIT 8
+        `).all();
+
+        const { results: adminPerfRows } = await env.DB.prepare(`
+          SELECT 
+            u.id, u.full_name, u.username, u.role,
+            COUNT(CASE WHEN i.is_deleted = 0 THEN i.id END) AS cards_generated,
+            MAX(i.created_at) AS last_active
+          FROM users u
+          LEFT JOIN invitations i ON i.created_by_id = u.id
+          WHERE u.is_active = 1
+          GROUP BY u.id
+          ORDER BY cards_generated DESC, u.full_name ASC
+        `).all();
 
         return json({
           success: true,
-          stats,
-          // Backward-compatible top-level aliases.
-          total_cards: stats.totalCards,
-          total_admins: stats.totalAdmins,
-          today_cards: stats.todayCards,
-          themes: stats.themes,
-          recent_cards: stats.recentCards,
-          admin_performance: adminActivity,
-          card_sequence: stats.cardSequence
+          total_cards: totalRow?.total || 0,
+          total_admins: activeAdminsRow?.total || 0,
+          today_cards: todayRow?.total || 0,
+          themes: themeRows || [],
+          recent_cards: recentRows || [],
+          admin_performance: adminPerfRows || []
         });
       }
 
