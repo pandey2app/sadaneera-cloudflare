@@ -163,9 +163,11 @@ export function comparePassword(plainPassword, hash) {
  */
 export async function ensureSuperAdmin(env) {
   const username = (env.SUPERADMIN_USERNAME || 'superadmin').toLowerCase().trim();
+  // Do not create a duplicate just because the configured username changed.
+  // Provision from Worker secrets only when the database has no Super Admin at all.
   const existing = await env.DB.prepare(
-    'SELECT id FROM users WHERE LOWER(username) = ?'
-  ).bind(username).first();
+    "SELECT id FROM users WHERE role = 'superadmin' LIMIT 1"
+  ).first();
 
   if (!existing) {
     const password = env.SUPERADMIN_PASSWORD;
