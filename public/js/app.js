@@ -1329,14 +1329,39 @@ document.addEventListener('DOMContentLoaded', () => {
   async function loadDashboard() {
     try {
       const res = await API.getDashboardStats();
-      const stats = res.stats || {};
+      // The Worker returns snake_case fields at the response root (not res.stats).
+      // Normalize here so the dashboard and its charts use the live API contract.
+      const rawAdmins = res.admin_performance || [];
+      const totalCards = Number(res.total_cards || 0);
+      const todayCards = Number(res.today_cards || 0);
+      const admins = rawAdmins.map((a) => ({
+        ...a,
+        full_name: a.full_name || 'Admin',
+        username: a.username || '',
+        admin_created_at: a.created_at || null,
+        total_cards: Number(a.cards_generated || 0),
+        active_cards: Number(a.cards_generated || 0),
+        deleted_actions: 0,
+        today_cards: 0,
+        lifetime_percentage: totalCards ? (Number(a.cards_generated || 0) / totalCards) * 100 : 0,
+        today_percentage: 0
+      }));
+      const stats = {
+        totalCards,
+        todayCards,
+        totalAdmins: Number(res.total_admins || 0),
+        myCards: Number(rawAdmins.find((a) => a.username === state.user?.username)?.cards_generated || 0),
+        lifetimeTotal: totalCards,
+        todayTotal: todayCards,
+        adminActivity: admins,
+        recentCards: res.recent_cards || []
+      };
 
       document.getElementById('statTotalCards').textContent = stats.totalCards || 0;
       document.getElementById('statTodayCards').textContent = stats.todayCards || 0;
       document.getElementById('statTotalAdmins').textContent = stats.totalAdmins || 0;
       document.getElementById('statMyCards').textContent = stats.myCards || 0;
 
-      const admins = stats.adminActivity || [];
       const activityBody = document.getElementById('adminActivityTableBody');
       if (activityBody) {
         if (!admins.length) {
