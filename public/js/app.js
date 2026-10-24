@@ -1186,7 +1186,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const roleBadge = `<span class="role-tag ${u.role}">${u.role}</span>`;
 
       let actionButtons = '';
-      if (!isCurrent && !u.is_primary) {
+      if (!isCurrent) {
         const toggleButton = !isSuper
           ? `<button class="action-btn" onclick="window.toggleAdminState(${u.id})">${u.is_active === 1 ? 'रोकें (Deactivate)' : 'सक्रिय करें (Activate)'}</button>`
           : '';
@@ -1194,7 +1194,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <button class="action-btn delete" onclick="window.deleteAdminUser(${u.id}, '${String(u.username).replace(/'/g, '&#39;')}')">🗑️ हटाएं</button>
         `;
       } else {
-        actionButtons = `<span style="font-size:0.75rem; color:var(--text-muted); font-style:italic;">मुख्य/वर्तमान सुरक्षित खाता</span>`;
+        actionButtons = `<span style="font-size:0.75rem; color:var(--text-muted); font-style:italic;">वर्तमान लॉगिन खाता सुरक्षित</span>`;
       }
 
       return `
