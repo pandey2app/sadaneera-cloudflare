@@ -332,11 +332,16 @@ export default {
         const target = await env.DB.prepare('SELECT id, username, role FROM users WHERE id = ?').bind(targetId).first();
         if (!target) return json({ success: false, message: 'Admin account not found.' }, 404);
 
-        // The username configured in Worker secrets is the canonical account.
-        // It must never be deleted; ensureSuperAdmin() would provision it again.
-        const primaryUsername = (env.SUPERADMIN_USERNAME || 'superadmin').trim().toLowerCase();
-        if (String(target.username || '').trim().toLowerCase() === primaryUsername) {
-          return json({ success: false, message: 'यह मुख्य Super Admin खाता है; इसे हटाया नहीं जा सकता।' }, 400);
+        // Any other Super Admin account can be deleted, including the username
+        // configured in Worker secrets. The current session account is protected above.
+        // ensureSuperAdmin() provisions only if no Super Admin exists at all.
+        if (target.role === 'superadmin') {
+          const remaining = await env.DB.prepare(
+            "SELECT COUNT(*) AS total FROM users WHERE role = 'superadmin' AND id != ?"
+          ).bind(targetId).first();
+          if (!remaining || Number(remaining.total || 0) < 1) {
+            return json({ success: false, message: 'कम-से-कम एक Super Admin अकाउंट रखना जरूरी है।' }, 400);
+          }
         }
 
         // A Super Admin may remove a duplicate/old Super Admin account, but not itself.
