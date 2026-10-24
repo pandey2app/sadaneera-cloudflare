@@ -392,6 +392,10 @@ document.addEventListener('DOMContentLoaded', () => {
       switchTab('dashboard');
       showToast(`स्वागत है, ${res.user.full_name}!`, 'success');
       if (typeof showInstallPromptOnce === 'function') showInstallPromptOnce();
+
+      // Reinitialize the app with the newly stored session so every panel
+      // and dashboard widget starts from fresh server data after login.
+      setTimeout(() => window.location.reload(), 350);
     } catch (err) {
       const rawMessage = String(err?.message || '');
       const isCredentialError = /invalid credentials|wrong password|incorrect password|unauthorized|401|गलत|पासवर्ड|प्रमाणित/i.test(rawMessage);
@@ -465,8 +469,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // seamlessly revealing the Login modal underneath with zero blank screen!
     if (logoutTransitionTimer) clearTimeout(logoutTransitionTimer);
     logoutTransitionTimer = setTimeout(() => {
-      hideSplash();
-      performLogout._running = false;
+      // Session has already been cleared. Reload into a clean unauthenticated
+      // state so no previous user's dashboard data remains on screen.
+      window.location.reload();
     }, 600);
   }
 
