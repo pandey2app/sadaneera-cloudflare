@@ -285,6 +285,7 @@ document.addEventListener('DOMContentLoaded', () => {
         updateHeaderUserUI();
         try { await loadMasterSettings(); } catch (_) {}
         switchTab(state.activeTab || 'dashboard');
+        startCardChangeSync();
         if (typeof showInstallPromptOnce === 'function') {
           showInstallPromptOnce();
         }
@@ -390,6 +391,7 @@ document.addEventListener('DOMContentLoaded', () => {
       updateHeaderUserUI();
       try { await loadMasterSettings(); } catch (_) {}
       switchTab('dashboard');
+      startCardChangeSync();
       showToast(`स्वागत है, ${res.user.full_name}!`, 'success');
       if (typeof showInstallPromptOnce === 'function') showInstallPromptOnce();
 
@@ -433,6 +435,11 @@ document.addEventListener('DOMContentLoaded', () => {
       console.warn('Logout network error ignored:', e);
     }
     state.user = null;
+    if (cardSyncTimer) {
+      clearInterval(cardSyncTimer);
+      cardSyncTimer = null;
+    }
+    lastCardChangeSignature = null;
 
     // 4. Clear header UI immediately
     const nameEl = document.getElementById('currentUserName');
@@ -1434,6 +1441,65 @@ document.addEventListener('DOMContentLoaded', () => {
       console.error('Failed to load dashboard:', err);
     }
   }
+
+  // Cross-browser admin sync: poll the authenticated dashboard summary for
+  // card changes. Refresh only dashboard/records data, never the whole page,
+  // so another admin's action cannot interrupt an unsaved generator form.
+  let lastCardChangeSignature = null;
+  let cardSyncInFlight = false;
+  let cardSyncTimer = null;
+
+  function getCardChangeSignature(res) {
+    const recent = (res?.recent_cards || []).map(card =>
+      `${card.id}:${Number(card.is_deleted) === 1 ? 1 : 0}`
+    ).join(',');
+    return [
+      Number(res?.total_cards || 0),
+      Number(res?.active_cards || 0),
+      Number(res?.deleted_cards || 0),
+      Number(res?.today_cards || 0),
+      recent
+    ].join('|');
+  }
+
+  async function syncCardChangesAcrossAdmins() {
+    if (!state.user || document.hidden || cardSyncInFlight) return;
+    cardSyncInFlight = true;
+    try {
+      const res = await API.getDashboardStats();
+      if (!res?.success) return;
+
+      const signature = getCardChangeSignature(res);
+      if (lastCardChangeSignature === null) {
+        lastCardChangeSignature = signature;
+        return;
+      }
+
+      if (signature !== lastCardChangeSignature) {
+        lastCardChangeSignature = signature;
+        // These functions update hidden tabs safely; they do not navigate or
+        // reload the page, preserving any in-progress card form.
+        await Promise.allSettled([loadDashboard(), loadRecords()]);
+      }
+    } catch (err) {
+      // A temporary network failure should not disrupt the active workflow.
+      console.debug('Cross-admin card sync deferred:', err?.message || err);
+    } finally {
+      cardSyncInFlight = false;
+    }
+  }
+
+  function startCardChangeSync() {
+    if (cardSyncTimer) clearInterval(cardSyncTimer);
+    lastCardChangeSignature = null;
+    // Establish a baseline immediately, then check for updates every 8 seconds.
+    syncCardChangesAcrossAdmins();
+    cardSyncTimer = setInterval(syncCardChangesAcrossAdmins, 8000);
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) syncCardChangesAcrossAdmins();
+  });
 
   // Application Startup & Auth State Resolution
   async function initApp() {
