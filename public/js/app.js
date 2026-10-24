@@ -1494,7 +1494,7 @@ document.addEventListener('DOMContentLoaded', () => {
     lastCardChangeSignature = null;
     // Establish a baseline immediately, then check for updates every 8 seconds.
     syncCardChangesAcrossAdmins();
-    cardSyncTimer = setInterval(syncCardChangesAcrossAdmins, 8000);
+    cardSyncTimer = setInterval(syncCardChangesAcrossAdmins, 60000);
   }
 
   document.addEventListener('visibilitychange', () => {
