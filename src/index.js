@@ -488,15 +488,32 @@ export default {
         const { results: adminPerfRows } = await env.DB.prepare(`
           SELECT
             u.id, u.full_name, u.username, u.role, u.created_at,
-            COUNT(i.id) AS total_cards,
-            COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 0 THEN i.id END) AS active_cards,
-            COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 1 THEN i.id END) AS deleted_cards,
-            COUNT(CASE WHEN DATE(i.created_at, '+5 hours', '+30 minutes') = DATE('now', '+5 hours', '+30 minutes') THEN i.id END) AS today_cards,
-            MAX(i.created_at) AS last_active
+            (SELECT COUNT(*)
+             FROM invitations created
+             WHERE created.created_by_id = u.id) AS total_cards,
+            (SELECT COUNT(*)
+             FROM invitations created
+             WHERE created.created_by_id = u.id
+               AND COALESCE(created.is_deleted, 0) = 0) AS active_cards,
+            (SELECT COUNT(*)
+             FROM invitations deleted
+             WHERE deleted.deleted_by_id = u.id
+               AND COALESCE(deleted.is_deleted, 0) = 1) AS deleted_cards,
+            (SELECT COUNT(*)
+             FROM invitations created_today
+             WHERE created_today.created_by_id = u.id
+               AND DATE(created_today.created_at, '+5 hours', '+30 minutes') = DATE('now', '+5 hours', '+30 minutes')) AS today_cards,
+            (SELECT MAX(activity_time) FROM (
+               SELECT created.created_at AS activity_time
+               FROM invitations created
+               WHERE created.created_by_id = u.id
+               UNION ALL
+               SELECT deleted.deleted_at AS activity_time
+               FROM invitations deleted
+               WHERE deleted.deleted_by_id = u.id
+             )) AS last_active
           FROM users u
-          LEFT JOIN invitations i ON i.created_by_id = u.id
           WHERE u.is_active = 1
-          GROUP BY u.id
           ORDER BY total_cards DESC, u.full_name ASC
         `).all();
 
