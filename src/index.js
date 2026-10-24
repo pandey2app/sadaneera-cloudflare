@@ -465,39 +465,47 @@ export default {
         const auth = await authenticateRequest(request, env);
         if (auth.error) return json({ success: false, message: auth.error }, auth.status);
 
-        const totalRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE is_deleted = 0').first();
+        // Dashboard metrics include soft-deleted cards in lifetime totals. "Active" and
+        // "deleted" are separate statuses; "today" means created today in India time.
+        const totalRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM invitations').first();
+        const activeCardRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 0').first();
+        const deletedCardRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM invitations WHERE COALESCE(is_deleted, 0) = 1').first();
         const activeAdminsRow = await env.DB.prepare('SELECT COUNT(*) AS total FROM users WHERE is_active = 1').first();
         const todayRow = await env.DB.prepare(
-          "SELECT COUNT(*) AS total FROM invitations WHERE is_deleted = 0 AND DATE(created_at) = DATE('now')"
+          "SELECT COUNT(*) AS total FROM invitations WHERE DATE(created_at, '+5 hours', '+30 minutes') = DATE('now', '+5 hours', '+30 minutes')"
         ).first();
 
         const { results: themeRows } = await env.DB.prepare(
-          'SELECT theme, COUNT(*) AS count FROM invitations WHERE is_deleted = 0 GROUP BY theme'
+          'SELECT theme, COUNT(*) AS count FROM invitations WHERE COALESCE(is_deleted, 0) = 0 GROUP BY theme'
         ).all();
 
         const { results: recentRows } = await env.DB.prepare(`
-          SELECT id, card_code, title, guest_name, photo_url, theme, created_by_name, created_at
+          SELECT id, card_code, title, guest_name, photo_url, theme, created_by_name, created_at, is_deleted
           FROM invitations
-          WHERE is_deleted = 0
           ORDER BY created_at DESC
           LIMIT 8
         `).all();
 
         const { results: adminPerfRows } = await env.DB.prepare(`
-          SELECT 
-            u.id, u.full_name, u.username, u.role,
-            COUNT(CASE WHEN i.is_deleted = 0 THEN i.id END) AS cards_generated,
+          SELECT
+            u.id, u.full_name, u.username, u.role, u.created_at,
+            COUNT(i.id) AS total_cards,
+            COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 0 THEN i.id END) AS active_cards,
+            COUNT(CASE WHEN COALESCE(i.is_deleted, 0) = 1 THEN i.id END) AS deleted_cards,
+            COUNT(CASE WHEN DATE(i.created_at, '+5 hours', '+30 minutes') = DATE('now', '+5 hours', '+30 minutes') THEN i.id END) AS today_cards,
             MAX(i.created_at) AS last_active
           FROM users u
           LEFT JOIN invitations i ON i.created_by_id = u.id
           WHERE u.is_active = 1
           GROUP BY u.id
-          ORDER BY cards_generated DESC, u.full_name ASC
+          ORDER BY total_cards DESC, u.full_name ASC
         `).all();
 
         return json({
           success: true,
           total_cards: totalRow?.total || 0,
+          active_cards: activeCardRow?.total || 0,
+          deleted_cards: deletedCardRow?.total || 0,
           total_admins: activeAdminsRow?.total || 0,
           today_cards: todayRow?.total || 0,
           themes: themeRows || [],
