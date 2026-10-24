@@ -1186,14 +1186,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const roleBadge = `<span class="role-tag ${u.role}">${u.role}</span>`;
 
       let actionButtons = '';
-      if (!isCurrent && u.username !== 'superadmin') {
-        const toggleLabel = u.is_active === 1 ? 'रोकें (Deactivate)' : 'सक्रिय करें (Activate)';
-        actionButtons = `
-          <button class="action-btn" onclick="window.toggleAdminState(${u.id})">${toggleLabel}</button>
-          <button class="action-btn delete" onclick="window.deleteAdminUser(${u.id}, '${u.username}')">🗑️ हटाएं</button>
+      if (!isCurrent && !u.is_primary) {
+        const toggleButton = !isSuper
+          ? `<button class="action-btn" onclick="window.toggleAdminState(${u.id})">${u.is_active === 1 ? 'रोकें (Deactivate)' : 'सक्रिय करें (Activate)'}</button>`
+          : '';
+        actionButtons = `${toggleButton}
+          <button class="action-btn delete" onclick="window.deleteAdminUser(${u.id}, '${String(u.username).replace(/'/g, '&#39;')}')">🗑️ हटाएं</button>
         `;
       } else {
-        actionButtons = `<span style="font-size:0.75rem; color:var(--text-muted); font-style:italic;">सुरक्षित खाता</span>`;
+        actionButtons = `<span style="font-size:0.75rem; color:var(--text-muted); font-style:italic;">मुख्य/वर्तमान सुरक्षित खाता</span>`;
       }
 
       return `
@@ -1249,7 +1250,7 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   window.deleteAdminUser = async function(userId, username) {
-    if (!confirm(`क्या आप प्रशासक "${username}" को स्थायी रूप से हटाना चाहते हैं?`)) return;
+    if (!confirm(`क्या आप "${username}" का अकाउंट हटाना चाहते हैं? यदि यह duplicate Super Admin है, तो उसके सक्रिय कार्ड Soft Delete होंगे। कार्ड रिकॉर्ड और Google Drive फोटो स्थायी रूप से नहीं मिटेंगे।`)) return;
     try {
       const res = await API.deleteAdmin(userId);
       showToast(res.message, 'success');
