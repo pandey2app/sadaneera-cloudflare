@@ -1442,12 +1442,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // Cross-browser admin sync: poll the authenticated dashboard summary for
-  // card changes. Refresh only dashboard/records data, never the whole page,
-  // so another admin's action cannot interrupt an unsaved generator form.
+  // Cross-browser admin sync runs only while the browser is visible and the
+  // admin is actively using it. Hidden tabs pause immediately; visible but idle
+  // tabs pause after 60 seconds without input (also covering a screen turned off).
+  // Sync updates data only and never reloads the page or resets the generator form.
   let lastCardChangeSignature = null;
   let cardSyncInFlight = false;
   let cardSyncTimer = null;
+  let cardSyncIdleTimer = null;
+  const CARD_SYNC_INTERVAL_MS = 10000;
+  const CARD_SYNC_IDLE_MS = 60000;
 
   function getCardChangeSignature(res) {
     const recent = (res?.recent_cards || []).map(card =>
@@ -1463,7 +1467,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function syncCardChangesAcrossAdmins() {
-    if (!state.user || document.hidden || cardSyncInFlight) return;
+    if (!state.user || document.hidden || cardSyncInFlight || !cardSyncTimer) return;
     cardSyncInFlight = true;
     try {
       const res = await API.getDashboardStats();
@@ -1477,30 +1481,68 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (signature !== lastCardChangeSignature) {
         lastCardChangeSignature = signature;
-        // These functions update hidden tabs safely; they do not navigate or
-        // reload the page, preserving any in-progress card form.
         await Promise.allSettled([loadDashboard(), loadRecords()]);
       }
     } catch (err) {
-      // A temporary network failure should not disrupt the active workflow.
       console.debug('Cross-admin card sync deferred:', err?.message || err);
     } finally {
       cardSyncInFlight = false;
     }
   }
 
-  function startCardChangeSync() {
+  function pauseCardChangeSync() {
     if (cardSyncTimer) clearInterval(cardSyncTimer);
-    lastCardChangeSignature = null;
-    // Establish a baseline immediately, then check every 10 seconds. API reads
-    // use cache: 'no-store', so each check reflects the latest Worker/D1 state.
-    syncCardChangesAcrossAdmins();
-    cardSyncTimer = setInterval(syncCardChangesAcrossAdmins, 10000);
+    if (cardSyncIdleTimer) clearTimeout(cardSyncIdleTimer);
+    cardSyncTimer = null;
+    cardSyncIdleTimer = null;
   }
 
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) syncCardChangesAcrossAdmins();
+  function armCardSyncIdleTimeout() {
+    if (cardSyncIdleTimer) clearTimeout(cardSyncIdleTimer);
+    cardSyncIdleTimer = setTimeout(() => {
+      // No input for 60 seconds: stop making polling requests entirely.
+      pauseCardChangeSync();
+    }, CARD_SYNC_IDLE_MS);
+  }
+
+  function resumeCardChangeSync() {
+    if (!state.user || document.hidden) return;
+    if (!cardSyncTimer) {
+      // Check immediately on resume, then continue at the normal interval.
+      cardSyncTimer = setInterval(syncCardChangesAcrossAdmins, CARD_SYNC_INTERVAL_MS);
+      syncCardChangesAcrossAdmins();
+    }
+    armCardSyncIdleTimeout();
+  }
+
+  function startCardChangeSync() {
+    pauseCardChangeSync();
+    lastCardChangeSignature = null;
+    if (!state.user || document.hidden) return;
+    // Start with a fresh baseline and stop automatically after inactivity.
+    cardSyncTimer = setInterval(syncCardChangesAcrossAdmins, CARD_SYNC_INTERVAL_MS);
+    syncCardChangesAcrossAdmins();
+    armCardSyncIdleTimeout();
+  }
+
+  // Input events reset the idle timer but never cause extra requests while active.
+  ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'].forEach(eventName => {
+    document.addEventListener(eventName, () => {
+      if (state.user && !document.hidden) resumeCardChangeSync();
+    }, { passive: true });
   });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      pauseCardChangeSync();
+    } else {
+      // Returning to the tab counts as activity and performs an immediate sync.
+      resumeCardChangeSync();
+    }
+  });
+
+  window.addEventListener('focus', () => resumeCardChangeSync());
+  window.addEventListener('blur', () => pauseCardChangeSync());
 
   // Application Startup & Auth State Resolution
   async function initApp() {
