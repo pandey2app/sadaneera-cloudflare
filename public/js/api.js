@@ -56,9 +56,13 @@ const API = {
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      const requestMethod = String(options.method || 'GET').toUpperCase();
+      const isApiRead = endpoint.startsWith('/api/') && requestMethod === 'GET';
       const res = await fetch(endpoint, {
         ...options,
         headers,
+        // API reads must always reach the Worker/D1, never a browser HTTP cache.
+        ...(isApiRead ? { cache: 'no-store' } : {}),
         signal: options.signal || controller.signal
       });
       clearTimeout(timeoutId);
