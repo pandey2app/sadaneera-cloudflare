@@ -634,16 +634,17 @@ export default {
         const event_time = eventSettings.event_time || 'सुबह 10 बजे से';
         const event_venue = eventSettings.event_venue || 'करवतही बाजार, गोपालगंज (बिहार)';
 
-        // Atomic card sequence increment in D1 (single atomic statement avoids race conditions under concurrency)
-        const updatedSeq = await env.DB.prepare(
-          'UPDATE card_sequence SET last_number = last_number + 1 WHERE id = 1 AND last_number < 9999 RETURNING last_number'
+        // Read the next candidate number without consuming it. A serial is reserved only
+        // after Google Drive confirms the photo upload succeeded.
+        const currentSeq = await env.DB.prepare(
+          'SELECT last_number FROM card_sequence WHERE id = 1'
         ).first();
-
-        if (!updatedSeq || updatedSeq.last_number === undefined) {
+        if (!currentSeq || Number(currentSeq.last_number) >= 9999) {
           return json({ success: false, message: 'Maximum 4-digit card serial limit (9999) reached or card sequence missing.' }, 400);
         }
 
-        const nextNumber = updatedSeq.last_number;
+        const previousNumber = Number(currentSeq.last_number);
+        const nextNumber = previousNumber + 1;
         const firstFourDigits = String(nextNumber).padStart(4, '0');
 
         // Cryptographically-random 4-digit suffix
@@ -651,7 +652,7 @@ export default {
         let cardSerial = '';
         let cardCode = '';
         const randomBuffer = new Uint16Array(1);
-        for (let attempt = 0; attempt < 20; attempt++) {
+        for (let attempt = 0; attempt < 40; attempt++) {
           crypto.getRandomValues(randomBuffer);
           const randVal = 1000 + (randomBuffer[0] % 9000);
           suffix = String(randVal);
@@ -661,10 +662,24 @@ export default {
           if (!exists) break;
           suffix = '';
         }
+        if (!suffix) {
+          return json({ success: false, message: 'Unique card code could not be allocated. Please retry.' }, 409);
+        }
 
-        // Upload photo to Google Drive
+        // Upload photo FIRST. No sequence increment happens if Drive upload fails.
         const photoFilename = `photo_${cardCode}.jpg`;
         const driveResult = await uploadPhoto(photoBytes, photoFilename, mimeType, env);
+
+        // Compare-and-swap prevents concurrent requests from consuming the same serial.
+        // If another request won the race, remove this uploaded photo and ask the user to retry.
+        const reservedSeq = await env.DB.prepare(
+          'UPDATE card_sequence SET last_number = ? WHERE id = 1 AND last_number = ? RETURNING last_number'
+        ).bind(nextNumber, previousNumber).first();
+        if (!reservedSeq || Number(reservedSeq.last_number) !== nextNumber) {
+          await deletePhoto(driveResult.fileId, env);
+          return json({ success: false, message: 'Another card was created at the same time. Your photo was cleaned up; please submit again.' }, 409);
+        }
+
         const photo_url = `/api/cards/photo/drive/${driveResult.fileId}`;
 
         const finalChecksum = checksum || `SN-${cardCode}-${Date.now()}`;
